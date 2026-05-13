@@ -99,15 +99,26 @@ class VectorDBAdapter(ABC):
         """
 
     @abstractmethod
-    async def delete_by_doc_id(
+    async def delete_by_normalized_filter(
         self,
         collection_name: str,
-        doc_id: str,
+        filters: dict | None,
     ) -> int:
+        """
+        Delete all points matching normalized metadata filter (``must`` list).
+        Used for bulk operations (e.g. full re-sync by ``ac_source_id``).
+        Returns count of deleted points.
+        """
+
+    async def delete_by_doc_id(self, collection_name: str, doc_id: str) -> int:
         """
         Deletes all points where payload.doc_id == doc_id.
         Returns count of deleted points.
         """
+        return await self.delete_by_normalized_filter(
+            collection_name,
+            {"must": [{"field": "doc_id", "value": doc_id}]},
+        )
 
     @abstractmethod
     async def get_by_doc_id(

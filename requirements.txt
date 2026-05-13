@@ -6,3 +6,8 @@ httpx==0.28.1
 qdrant-client==1.13.3
 pinecone-client==3.2.2
 sqlalchemy==2.0.49
+apscheduler==3.11.0
+slack-sdk==3.34.0
+aiohttp>=3.9.0
+openai==1.75.0
+cryptography==44.0.2

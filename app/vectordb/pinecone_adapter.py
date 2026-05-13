@@ -191,22 +191,41 @@ class PineconeAdapter(VectorDBAdapter):
         except Exception as e:  # noqa: BLE001
             raise VectorDBError(str(e), self.backend_name, detail=str(e)) from e
 
-    async def delete_by_doc_id(self, collection_name: str, doc_id: str) -> int:
+    async def delete_by_normalized_filter(
+        self,
+        collection_name: str,
+        filters: dict | None,
+    ) -> int:
+        """
+        Delete by metadata filter using repeated query + delete.
+        May require multiple rounds when more than top_k matches exist.
+        """
         try:
             idx = self._index(collection_name)
-            flt = {"doc_id": {"$eq": doc_id}}
             dim = self._describe_dimension(self._index_name(collection_name))
             dummy = [0.0] * dim
-            res = idx.query(vector=dummy, top_k=10000, filter=flt, include_metadata=False)
-            matches = getattr(res, "matches", None)
-            if matches is None and isinstance(res, dict):
-                matches = res.get("matches", [])
-            matches = matches or []
-            ids = [str(m.get("id") if isinstance(m, dict) else m.id) for m in matches]
-            if not ids:
-                return 0
-            idx.delete(ids=ids)
-            return len(ids)
+            flt = filter_utils.build_pinecone_filter(filters)
+            total_deleted = 0
+            top_k = 10_000
+            for _ in range(1000):
+                res = idx.query(
+                    vector=dummy,
+                    top_k=top_k,
+                    filter=flt,
+                    include_metadata=False,
+                )
+                matches = getattr(res, "matches", None)
+                if matches is None and isinstance(res, dict):
+                    matches = res.get("matches", [])
+                matches = matches or []
+                ids = [str(m.get("id") if isinstance(m, dict) else m.id) for m in matches]
+                if not ids:
+                    break
+                idx.delete(ids=ids)
+                total_deleted += len(ids)
+                if len(ids) < top_k:
+                    break
+            return total_deleted
         except VectorDBError:
             raise
         except Exception as e:  # noqa: BLE001

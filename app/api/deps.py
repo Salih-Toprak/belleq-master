@@ -13,7 +13,10 @@ from app.registry.registry import ContainerRegistry
 from app.vectordb.base import VectorDBAdapter
 
 if TYPE_CHECKING:
-    pass
+    from app.embeddings.base import EmbeddingAdapter
+    from app.ingestion.pipeline import IngestionPipeline
+    from app.ingestion.scheduler import IngestionScheduler
+    from app.sources.registry import DataSourceRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -49,3 +52,30 @@ def get_registry(request: Request) -> ContainerRegistry:
 
 def get_client(request: Request) -> ContainerClient:
     return request.app.state.client
+
+
+def get_embedder(request: Request) -> "EmbeddingAdapter | None":
+    return getattr(request.app.state, "embedder", None)
+
+
+def require_embedder(request: Request) -> "EmbeddingAdapter":
+    embedder = get_embedder(request)
+    if embedder is None:
+        logger.warning("embedding_adapter_unavailable_request")
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding adapter is unavailable (see startup logs).",
+        )
+    return embedder
+
+
+def get_source_registry(request: Request) -> "DataSourceRegistry":
+    return request.app.state.source_registry
+
+
+def get_pipeline(request: Request) -> "IngestionPipeline":
+    return request.app.state.ingestion_pipeline
+
+
+def get_scheduler(request: Request) -> "IngestionScheduler":
+    return request.app.state.ingestion_scheduler
