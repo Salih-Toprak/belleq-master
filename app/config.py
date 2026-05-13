@@ -53,6 +53,21 @@ class Settings(BaseSettings):
     container_call_timeout: float = Field(default=10.0)
     container_health_timeout: float = Field(default=3.0)
 
+    # Embedding
+    embedding_backend: str = Field(default="ollama")
+    ollama_base_url: str = Field(default="http://ollama:11434")
+    ollama_embed_model: str = Field(default="nomic-embed-text")
+    openai_api_key: str = Field(default="")
+    openai_embed_model: str = Field(default="text-embedding-3-small")
+    embedding_vector_size: int = Field(default=768)
+
+    # Ingestion
+    ingestion_interval_minutes: int = Field(default=60)
+    ingestion_collection: str = Field(default="company_knowledge")
+
+    # Security (optional Fernet key for credentials at rest)
+    credential_encryption_key: str = Field(default="")
+
 
 settings = Settings()
 logger.debug(

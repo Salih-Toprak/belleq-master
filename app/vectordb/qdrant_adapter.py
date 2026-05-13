@@ -165,10 +165,12 @@ class QdrantAdapter(VectorDBAdapter):
         except Exception as e:  # noqa: BLE001
             raise VectorDBError(str(e), self.backend_name, detail=str(e)) from e
 
-    async def delete_by_doc_id(self, collection_name: str, doc_id: str) -> int:
-        flt = filter_utils.build_qdrant_filter(
-            {"must": [{"field": "doc_id", "value": doc_id}]}
-        )
+    async def delete_by_normalized_filter(
+        self,
+        collection_name: str,
+        filters: dict | None,
+    ) -> int:
+        flt = filter_utils.build_qdrant_filter(filters)
         total_deleted = 0
         try:
             while True:

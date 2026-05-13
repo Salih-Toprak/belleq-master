@@ -67,6 +67,15 @@ curl -sS -X POST http://localhost:9000/master/registry/containers \
 | `APP_PORT` | `9000` | HTTP port inside the container / `uvicorn` port. |
 | `CONTAINER_CALL_TIMEOUT` | `10.0` | httpx timeout for `/stats`, `/docs`, etc. |
 | `CONTAINER_HEALTH_TIMEOUT` | `3.0` | httpx timeout for `/health` probes. |
+| `EMBEDDING_BACKEND` | `ollama` | `ollama` or `openai`. |
+| `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama API base URL. |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model name. |
+| `OPENAI_API_KEY` | _(empty)_ | Required when `EMBEDDING_BACKEND=openai`. |
+| `OPENAI_EMBED_MODEL` | `text-embedding-3-small` | OpenAI embedding model id. |
+| `EMBEDDING_VECTOR_SIZE` | `768` | Must match model output dimension. |
+| `INGESTION_INTERVAL_MINUTES` | `60` | Scheduler interval (also stored in SQLite after first run). |
+| `INGESTION_COLLECTION` | `company_knowledge` | Target Qdrant collection / Pinecone index for ingested chunks. |
+| `CREDENTIAL_ENCRYPTION_KEY` | _(empty)_ | Optional Fernet key for encrypting source credentials at rest. |
 
 ## API overview
 
@@ -97,6 +106,24 @@ curl -sS -X POST http://localhost:9000/master/registry/containers \
 | `/master/aggregate/containers/{id}/docs/{doc_id}/flag` | POST | Proxy flag. |
 | `/master/aggregate/containers/{id}/docs/{doc_id}/unflag` | POST | Proxy unflag. |
 | `/master/aggregate/containers/{id}/docs/{doc_id}` | DELETE | User delete + master vector delete (independent steps). |
+| `/master/embeddings/health` | GET | Embedding adapter health. |
+| `/master/embeddings/config` | GET | Stored / env embedding config (secrets redacted). |
+| `/master/embeddings/config` | PUT | Validate + persist embedding config (restart required). |
+| `/master/embeddings/test` | POST | Sample embed; returns first 5 dimensions only. |
+| `/master/sources` | GET | List data sources (`enabled_only`, `source_type`). |
+| `/master/sources` | POST | Register Slack/Notion source (validates credentials first). |
+| `/master/sources/{id}` | GET | One source (redacted). |
+| `/master/sources/{id}` | PATCH | Update display/access/metadata. |
+| `/master/sources/{id}` | DELETE | Remove source + sync logs. |
+| `/master/sources/{id}/enable` | POST | Enable source. |
+| `/master/sources/{id}/disable` | POST | Disable source. |
+| `/master/sources/{id}/validate` | POST | Re-check credentials. |
+| `/master/sources/{id}/sync-history` | GET | Recent sync log rows. |
+| `/master/ingestion/status` | GET | Per-source sync fields. |
+| `/master/ingestion/sync` | POST | Background `ingest_all` (`full_resync` query). |
+| `/master/ingestion/sync/{source_id}` | POST | Background single-source ingest. |
+| `/master/ingestion/scheduler` | GET | Scheduler status + next run. |
+| `/master/ingestion/scheduler` | PUT | Update interval minutes. |
 
 Interactive OpenAPI docs: `http://localhost:9000/docs`.
 
@@ -150,6 +177,81 @@ Replace `tls internal` with your domain block for real certificates (Let’s Enc
 2. Add filter helpers if needed (or reuse normalized filters in `filters.py`).
 3. Extend `get_vector_db_adapter()` in `app/vectordb/factory.py`.
 4. Add settings + `.env.example` entries and document them in this README.
+
+## Data Sources & Ingestion
+
+Ingestion pulls content from registered **Slack** or **Notion** sources, splits it into overlapping text chunks, attaches **access-control metadata** (`ac_*` fields) to every vector payload, embeds chunks via the configured **EmbeddingAdapter**, and upserts points into the master vector collection (`INGESTION_COLLECTION`, default `company_knowledge`). A background **APScheduler** job runs `ingest_all` on `INGESTION_INTERVAL_MINUTES` (also persisted in SQLite and adjustable via `PUT /master/ingestion/scheduler`).
+
+### Supported embedding backends
+
+| Backend | Example model | Vector size | Notes |
+|---------|----------------|------------|--------|
+| ollama | nomic-embed-text | 768 | Local, no API cost |
+| openai | text-embedding-3-small | 1536 | Cloud |
+| openai | text-embedding-3-large | 3072 | Cloud, highest quality |
+
+### Register Slack + trigger sync
+
+```bash
+curl -sS -X POST "http://localhost:9000/master/sources" \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Key: YOUR_KEY" \
+  -d '{
+    "source_id": "slack-main",
+    "source_type": "slack",
+    "display_name": "Main Slack",
+    "credentials": { "bot_token": "xoxb-..." },
+    "access_control": {
+      "allowed_channels": ["general"],
+      "excluded_channels": [],
+      "include_threads": true,
+      "max_history_days": 90,
+      "departments": ["engineering"]
+    },
+    "metadata": {}
+  }'
+
+curl -sS -X POST "http://localhost:9000/master/ingestion/sync/slack-main?full_resync=false" \
+  -H "X-Admin-Key: YOUR_KEY"
+```
+
+### Register Notion + trigger sync
+
+```bash
+curl -sS -X POST "http://localhost:9000/master/sources" \
+  -H "Content-Type: application/json" \
+  -H "X-Admin-Key: YOUR_KEY" \
+  -d '{
+    "source_id": "notion-hr",
+    "source_type": "notion",
+    "display_name": "HR Handbook",
+    "credentials": { "integration_token": "secret_..." },
+    "access_control": {
+      "allowed_page_ids": ["PAGE_UUID"],
+      "allowed_database_ids": [],
+      "excluded_page_ids": [],
+      "max_depth": 2,
+      "departments": ["hr"]
+    },
+    "metadata": {}
+  }'
+
+curl -sS -X POST "http://localhost:9000/master/ingestion/sync/notion-hr" \
+  -H "X-Admin-Key: YOUR_KEY"
+```
+
+### Access-control metadata on vectors
+
+Each chunk payload includes: `ac_source_id` (matches `DataSourceRecord.source_id`), `ac_channels` (Slack channel names), `ac_page_ids` (Notion page ids for the chunk), and `ac_departments` (department tags). User containers can filter retrieval using these fields once per-user ACL is implemented in the dashboard.
+
+### Scheduler API
+
+- `GET /master/ingestion/scheduler` — `running`, `interval_minutes`, `next_run` (ISO or null).
+- `PUT /master/ingestion/scheduler` with `{"interval_minutes": 30}` — updates SQLite and reschedules the job immediately.
+
+### Credential storage
+
+Credentials are stored in SQLite (`credentials_json`). With `CREDENTIAL_ENCRYPTION_KEY` empty, values are **plaintext JSON (development only)**. Set a Fernet key to encrypt at rest; all HTTP responses **redact** secrets (`***set***`).
 
 ## Local development without Docker
 
