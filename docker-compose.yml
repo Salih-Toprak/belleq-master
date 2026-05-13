@@ -1,0 +1,36 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: mnemo-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - mnemo-net
+
+  master:
+    build: .
+    container_name: mnemo-master
+    ports:
+      - "9000:9000"
+    env_file:
+      - .env
+    environment:
+      APP_PORT: "9000"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - qdrant
+    networks:
+      - mnemo-net
+    restart: on-failure
+
+networks:
+  mnemo-net:
+    name: mnemo-net
+    driver: bridge
+
+volumes:
+  qdrant_data:

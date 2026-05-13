@@ -1,0 +1,6 @@
+# Self-signed TLS for local production-style testing.
+# Replace `tls internal` with your real domain and remove `tls internal` for public HTTPS + ACME.
+:443 {
+	tls internal
+	reverse_proxy master:9000
+}
