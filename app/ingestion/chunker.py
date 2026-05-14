@@ -100,6 +100,13 @@ def build_chunk_metadata(
 
 
 def make_point_id(doc_id: str, chunk_index: int) -> str:
-    """Deterministic point id (16 hex chars) for idempotent upserts."""
-    h = hashlib.sha256(f"{doc_id}::{chunk_index}".encode("utf-8")).hexdigest()
-    return h[:16]
+    """
+    Deterministic UUID point ID from doc_id + chunk_index.
+    Uses first 16 bytes of SHA256 hash formatted as UUID.
+    Qdrant requires either UUID or unsigned integer as point ID.
+    """
+    import uuid
+    hash_bytes = hashlib.sha256(
+        f"{doc_id}::{chunk_index}".encode()
+    ).digest()
+    return str(uuid.UUID(bytes=hash_bytes[:16]))

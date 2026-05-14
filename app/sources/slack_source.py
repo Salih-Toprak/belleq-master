@@ -176,4 +176,4 @@ class SlackSource:
         return out
 
     async def close(self) -> None:
-        await self._client.close()
+        pass  # AsyncWebClient has no close method
