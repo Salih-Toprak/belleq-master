@@ -1,27 +1,27 @@
 services:
   ollama:
     image: ollama/ollama:latest
-    container_name: mnemo-ollama
+    container_name: belleq-ollama
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama   # reuse existing volume with models
     networks:
-      - mnemo-net
+      - belleq-net
     restart: always
 
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: mnemo-qdrant
+    container_name: belleq-qdrant
     volumes:
       - qdrant_data:/qdrant/storage
     networks:
-      - mnemo-net
+      - belleq-net
     restart: always
 
   master:
     build: .
-    container_name: mnemo-master
+    container_name: belleq-master
     ports:
       - "9000:9000"
     env_file:
@@ -32,13 +32,13 @@ services:
       - qdrant
       - ollama
     networks:
-      - mnemo-net
+      - belleq-net
     restart: on-failure
 
 networks:
-  mnemo-net:
+  belleq-net:
     external: true
-    name: mnemo-net
+    name: belleq-net
 
 volumes:
   qdrant_data:

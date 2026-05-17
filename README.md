@@ -1,16 +1,16 @@
-# mnemo-master
+# belleq-master
 
-The **Mnemo Master Container** is the master orchestration layer for the Mnemo knowledge infrastructure platform. It is not an end-user application: it is one independently deployable building block that coordinates a central vector store, a container registry, and HTTP calls into many user-scoped containers.
+The **Belleq Master Container** is the master orchestration layer for the Belleq knowledge infrastructure platform. It is not an end-user application: it is one independently deployable building block that coordinates a central vector store, a container registry, and HTTP calls into many user-scoped containers.
 
 ## The building block principle
 
-Each Mnemo component lives in its own repository and ships as its own container image. Components communicate over stable HTTP contracts and configuration (environment variables and the SQLite registry), so you can upgrade, scale, or replace one piece without rebuilding the whole platform. This master container never imports user container code and never reads user container databases; it only calls their HTTP APIs.
+Each Belleq component lives in its own repository and ships as its own container image. Components communicate over stable HTTP contracts and configuration (environment variables and the SQLite registry), so you can upgrade, scale, or replace one piece without rebuilding the whole platform. This master container never imports user container code and never reads user container databases; it only calls their HTTP APIs.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/sstprk/mnemo-master.git
-cd mnemo-master
+git clone https://github.com/sstprk/belleq-master.git
+cd belleq-master
 cp .env.example .env
 docker compose up --build
 ```
@@ -148,16 +148,16 @@ If `api_key` is set on the registry row, it is sent as `X-Container-Key`.
 
 ## Network setup
 
-`docker-compose.yml` defines a **named bridge** network `mnemo-net`. Attach other stacks to the same network name so the master can call user containers by DNS name:
+`docker-compose.yml` defines a **named bridge** network `belleq-net`. Attach other stacks to the same network name so the master can call user containers by DNS name:
 
 ```yaml
 networks:
   default:
-    name: mnemo-net
+    name: belleq-net
     external: true
 ```
 
-Alternatively, run all services from a single Compose project that shares `mnemo-net`.
+Alternatively, run all services from a single Compose project that shares `belleq-net`.
 
 ## Production Compose + HTTPS
 
@@ -265,4 +265,4 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 9000
 
 ## License
 
-Proprietary / TBD — set the license for the `sstprk/mnemo-master` repository as appropriate.
+Proprietary / TBD — set the license for the `sstprk/belleq-master` repository as appropriate.

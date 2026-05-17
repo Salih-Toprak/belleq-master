@@ -1,4 +1,4 @@
-"""Mnemo Master API — FastAPI application entrypoint."""
+"""Belleq Master API — FastAPI application entrypoint."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    logger.info("starting_mnemo_master")
+    logger.info("starting_belleq_master")
 
     db = MasterDB(
         url=settings.master_db_url,
@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     app.state.ingestion_scheduler = scheduler
 
-    logger.info("mnemo_master_ready host=%s port=%s", settings.app_host, settings.app_port)
+    logger.info("belleq_master_ready host=%s port=%s", settings.app_host, settings.app_port)
     yield
 
     scheduler.stop()
@@ -132,13 +132,13 @@ async def lifespan(app: FastAPI):
     if emb is not None and hasattr(emb, "aclose"):
         await emb.aclose()
     await client.close()
-    logger.info("mnemo_master_shutdown")
+    logger.info("belleq_master_shutdown")
 
 
 app = FastAPI(
-    title="Mnemo Master API",
+    title="Belleq Master API",
     description="""
-Master orchestration layer for the Mnemo knowledge infrastructure platform.
+Master orchestration layer for the Belleq knowledge infrastructure platform.
 
 Responsibilities:
 - Manage the master vector database (collection CRUD, document operations)

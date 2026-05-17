@@ -1,1 +1,1 @@
-"""Mnemo Master Container application package."""
+"""Belleq Master Container application package."""

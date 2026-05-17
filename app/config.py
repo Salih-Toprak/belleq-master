@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
-    """Mnemo Master Container configuration (env-driven, no hardcoded secrets)."""
+    """Belleq Master Container configuration (env-driven, no hardcoded secrets)."""
 
     model_config = SettingsConfigDict(
         env_file=".env",

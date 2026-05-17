@@ -83,7 +83,13 @@ class QdrantAdapter(VectorDBAdapter):
         vs = 0
         dist = "Cosine"
         if params and params.vectors:
-            v = next(iter(params.vectors.values()))
+            vec_cfg = params.vectors
+            # vectors can be a VectorParams (single/unnamed vector) or a
+            # dict-like mapping of named vectors.  Handle both cases.
+            if isinstance(vec_cfg, qmodels.VectorParams):
+                v = vec_cfg
+            else:
+                v = next(iter(vec_cfg.values()))
             if hasattr(v, "size"):
                 vs = int(v.size or 0)
             if hasattr(v, "distance"):
