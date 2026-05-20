@@ -1,15 +1,4 @@
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: belleq-ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama   # reuse existing volume with models
-    networks:
-      - belleq-net
-    restart: always
-
   qdrant:
     image: qdrant/qdrant:latest
     container_name: belleq-qdrant
@@ -30,7 +19,6 @@ services:
       - ./data:/app/data
     depends_on:
       - qdrant
-      - ollama
     networks:
       - belleq-net
     restart: on-failure
@@ -41,8 +29,3 @@ networks:
 
 volumes:
   qdrant_data:
-    external: true
-    name: chatbot_qdrant_data
-  ollama_data: 
-    external: true
-    name: chatbot_ollama_data
