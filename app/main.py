@@ -17,10 +17,12 @@ from app.api import (
     aggregate_routes,
     embeddings_routes,
     ingestion_routes,
+    mcp_routes,
     registry_routes,
     sources_routes,
     vectordb_routes,
 )
+from app.mcp_connectors.registry import MCPConnectorRegistry
 from app.clients.container_client import ContainerClient
 from app.config import settings
 from app.database import MasterDB
@@ -109,6 +111,11 @@ async def lifespan(app: FastAPI):
     srcs = source_registry.list_all(enabled_only=True)
     logger.info("data_source_registry_loaded enabled_sources=%s", len(srcs))
 
+    mcp_connector_registry = MCPConnectorRegistry(db)
+    app.state.mcp_connector_registry = mcp_connector_registry
+    conns = mcp_connector_registry.list_all(enabled_only=False)
+    logger.info("mcp_connector_registry_loaded connectors=%s", len(conns))
+
     pipeline = IngestionPipeline(
         vectordb=app.state.vectordb,
         embedder=app.state.embedder,
@@ -161,6 +168,7 @@ app.include_router(aggregate_routes.router)
 app.include_router(embeddings_routes.router)
 app.include_router(sources_routes.router)
 app.include_router(ingestion_routes.router)
+app.include_router(mcp_routes.router)
 
 
 @app.get("/health", tags=["Health"])

@@ -28,6 +28,7 @@ from sqlalchemy.engine import Engine, make_url
 from app.registry.models import ContainerRecord
 from app.credential_crypto import pack_credentials, unpack_credentials
 from app.sources.models import DataSourceRecord, SyncLogEntry
+from app.mcp_connectors.models import ContainerConnectorLink, MCPConnectorRecord
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,37 @@ ingestion_scheduler = Table(
     Column("id", String, primary_key=True),
     Column("interval_minutes", Integer, nullable=False, server_default="60"),
     Column("updated_at", DateTime, nullable=False),
+)
+
+# Upstream MCP servers registered by the user (Notion MCP, GitHub MCP, ...).
+mcp_connectors = Table(
+    "mcp_connectors",
+    metadata,
+    Column("connector_id", String, primary_key=True),
+    Column("display_name", String, nullable=False, server_default=""),
+    Column("transport", String, nullable=False, server_default="streamable_http"),
+    Column("url", String, nullable=False, server_default=""),
+    Column("command", String, nullable=False, server_default=""),
+    Column("args_json", Text, nullable=False, server_default="[]"),
+    # headers + env (secret material) packed together, encrypted at rest.
+    Column("secrets_json", Text, nullable=False, server_default="{}"),
+    Column("enabled", Boolean, nullable=False, server_default="1"),
+    Column("last_status", String, nullable=False, server_default="unknown"),
+    Column("last_error", Text, nullable=False, server_default=""),
+    Column("last_checked_at", DateTime, nullable=True),
+    Column("tool_count", Integer, nullable=False, server_default="0"),
+    Column("added_at", DateTime, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+    Column("metadata_json", Text, nullable=False, server_default="{}"),
+)
+
+# Per-container connector whitelist (which connectors a container may see).
+container_mcp_acl = Table(
+    "container_mcp_acl",
+    metadata,
+    Column("container_id", String, primary_key=True),
+    Column("connector_id", String, primary_key=True),
+    Column("added_at", DateTime, nullable=False),
 )
 
 
@@ -610,3 +642,212 @@ class MasterDB:
                     )
                 )
         logger.info("scheduler_interval_saved minutes=%s", interval_minutes)
+
+    # --- MCP connectors -----------------------------------------------
+
+    def _row_to_connector(self, row: Any) -> MCPConnectorRecord:
+        try:
+            args = json.loads(row.args_json or "[]")
+            if not isinstance(args, list):
+                args = []
+        except json.JSONDecodeError:
+            args = []
+        try:
+            meta = json.loads(row.metadata_json or "{}")
+            if not isinstance(meta, dict):
+                meta = {}
+        except json.JSONDecodeError:
+            meta = {}
+        secrets = unpack_credentials(row.secrets_json or "{}", self._credential_encryption_key)
+        headers = secrets.get("headers") if isinstance(secrets.get("headers"), dict) else {}
+        env = secrets.get("env") if isinstance(secrets.get("env"), dict) else {}
+        return MCPConnectorRecord(
+            connector_id=row.connector_id,
+            display_name=row.display_name or "",
+            transport=row.transport or "streamable_http",
+            url=row.url or "",
+            command=row.command or "",
+            args=args,
+            headers=headers,
+            env=env,
+            enabled=bool(row.enabled),
+            added_at=row.added_at,
+            updated_at=row.updated_at,
+            last_status=row.last_status or "unknown",
+            last_error=row.last_error or "",
+            last_checked_at=row.last_checked_at,
+            tool_count=int(row.tool_count or 0),
+            metadata=meta,
+        )
+
+    def _connector_to_dict(self, record: MCPConnectorRecord) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        added = record.added_at or now
+        updated = record.updated_at or now
+        secrets_stored = pack_credentials(
+            {"headers": record.headers or {}, "env": record.env or {}},
+            self._credential_encryption_key,
+        )
+        return {
+            "connector_id": record.connector_id,
+            "display_name": record.display_name,
+            "transport": record.transport,
+            "url": record.url or "",
+            "command": record.command or "",
+            "args_json": json.dumps(record.args or []),
+            "secrets_json": secrets_stored,
+            "enabled": record.enabled,
+            "last_status": record.last_status or "unknown",
+            "last_error": record.last_error or "",
+            "last_checked_at": record.last_checked_at,
+            "tool_count": int(record.tool_count or 0),
+            "added_at": added,
+            "updated_at": updated,
+            "metadata_json": json.dumps(record.metadata or {}),
+        }
+
+    def get_connector(self, connector_id: str) -> MCPConnectorRecord | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(mcp_connectors).where(mcp_connectors.c.connector_id == connector_id)
+            ).mappings().first()
+            if row is None:
+                return None
+            return self._row_to_connector(row)
+
+    def list_connectors(self, enabled_only: bool = False) -> list[MCPConnectorRecord]:
+        stmt = select(mcp_connectors).order_by(mcp_connectors.c.added_at)
+        if enabled_only:
+            stmt = stmt.where(mcp_connectors.c.enabled.is_(True))
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+            return [self._row_to_connector(r) for r in rows]
+
+    def add_connector(self, record: MCPConnectorRecord) -> None:
+        if self.get_connector(record.connector_id) is not None:
+            raise ValueError(f"connector_id already exists: {record.connector_id}")
+        data = self._connector_to_dict(record)
+        with self._engine.begin() as conn:
+            conn.execute(insert(mcp_connectors).values(**data))
+        logger.info("mcp_connector_added connector_id=%s", record.connector_id)
+
+    def update_connector(self, connector_id: str, updates: dict[str, Any]) -> MCPConnectorRecord:
+        current = self.get_connector(connector_id)
+        if current is None:
+            raise KeyError(connector_id)
+        forbidden = {"connector_id", "added_at"}
+        for k in updates:
+            if k in forbidden:
+                raise ValueError(f"cannot update field: {k}")
+        now = datetime.now(timezone.utc)
+        payload: dict[str, Any] = {"updated_at": now}
+        # Secrets travel together; re-pack from the merged view.
+        if "headers" in updates or "env" in updates:
+            headers = updates.get("headers", current.headers) or {}
+            env = updates.get("env", current.env) or {}
+            payload["secrets_json"] = pack_credentials(
+                {"headers": headers, "env": env}, self._credential_encryption_key
+            )
+        if "args" in updates:
+            payload["args_json"] = json.dumps(updates["args"] or [])
+        if "metadata" in updates:
+            payload["metadata_json"] = json.dumps(updates["metadata"] or {})
+        for fld in (
+            "display_name",
+            "transport",
+            "url",
+            "command",
+            "enabled",
+            "last_status",
+            "last_error",
+            "last_checked_at",
+            "tool_count",
+        ):
+            if fld in updates:
+                payload[fld] = updates[fld]
+        with self._engine.begin() as conn:
+            conn.execute(
+                update(mcp_connectors)
+                .where(mcp_connectors.c.connector_id == connector_id)
+                .values(**payload)
+            )
+        updated = self.get_connector(connector_id)
+        assert updated is not None
+        logger.info("mcp_connector_updated connector_id=%s", connector_id)
+        return updated
+
+    def remove_connector(self, connector_id: str) -> None:
+        if self.get_connector(connector_id) is None:
+            raise KeyError(connector_id)
+        with self._engine.begin() as conn:
+            conn.execute(
+                delete(container_mcp_acl).where(container_mcp_acl.c.connector_id == connector_id)
+            )
+            conn.execute(
+                delete(mcp_connectors).where(mcp_connectors.c.connector_id == connector_id)
+            )
+        logger.info("mcp_connector_removed connector_id=%s", connector_id)
+
+    # --- Per-container connector whitelist ----------------------------
+
+    def list_connectors_for_container(self, container_id: str) -> list[str]:
+        """Return the connector ids whitelisted for a container."""
+        stmt = (
+            select(container_mcp_acl.c.connector_id)
+            .where(container_mcp_acl.c.container_id == container_id)
+            .order_by(container_mcp_acl.c.added_at)
+        )
+        with self._engine.connect() as conn:
+            return [r[0] for r in conn.execute(stmt).all()]
+
+    def list_containers_for_connector(self, connector_id: str) -> list[str]:
+        stmt = (
+            select(container_mcp_acl.c.container_id)
+            .where(container_mcp_acl.c.connector_id == connector_id)
+            .order_by(container_mcp_acl.c.added_at)
+        )
+        with self._engine.connect() as conn:
+            return [r[0] for r in conn.execute(stmt).all()]
+
+    def set_container_connectors(self, container_id: str, connector_ids: list[str]) -> list[str]:
+        """Replace a container's whitelist with exactly ``connector_ids``."""
+        now = datetime.now(timezone.utc)
+        wanted = [c for c in dict.fromkeys(connector_ids)]  # de-dupe, keep order
+        with self._engine.begin() as conn:
+            conn.execute(
+                delete(container_mcp_acl).where(container_mcp_acl.c.container_id == container_id)
+            )
+            for cid in wanted:
+                conn.execute(
+                    insert(container_mcp_acl).values(
+                        container_id=container_id, connector_id=cid, added_at=now
+                    )
+                )
+        logger.info(
+            "container_mcp_acl_set container_id=%s count=%s", container_id, len(wanted)
+        )
+        return wanted
+
+    def add_container_connector(self, container_id: str, connector_id: str) -> None:
+        now = datetime.now(timezone.utc)
+        with self._engine.begin() as conn:
+            exists = conn.execute(
+                select(container_mcp_acl.c.connector_id)
+                .where(container_mcp_acl.c.container_id == container_id)
+                .where(container_mcp_acl.c.connector_id == connector_id)
+            ).first()
+            if exists:
+                return
+            conn.execute(
+                insert(container_mcp_acl).values(
+                    container_id=container_id, connector_id=connector_id, added_at=now
+                )
+            )
+
+    def remove_container_connector(self, container_id: str, connector_id: str) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(
+                delete(container_mcp_acl)
+                .where(container_mcp_acl.c.container_id == container_id)
+                .where(container_mcp_acl.c.connector_id == connector_id)
+            )
