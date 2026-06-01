@@ -68,6 +68,24 @@ class Settings(BaseSettings):
     # Security (optional Fernet key for credentials at rest)
     credential_encryption_key: str = Field(default="")
 
+    # User container provisioning (Docker-out-of-Docker via mounted socket)
+    user_container_image: str = Field(
+        default="belleq-user:latest",
+        description="Image used when provisioning a new user container.",
+    )
+    belleq_network: str = Field(
+        default="belleq-net",
+        description="Docker network user containers join (same as master/qdrant).",
+    )
+    user_container_port: int = Field(
+        default=8000,
+        description="Port the user container listens on inside the network.",
+    )
+    user_container_health_timeout: float = Field(
+        default=90.0,
+        description="Seconds to wait for a freshly provisioned container's /health.",
+    )
+
 
 settings = Settings()
 logger.debug(
