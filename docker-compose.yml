@@ -17,6 +17,8 @@ services:
       - .env
     volumes:
       - ./data:/app/data
+      # Docker-out-of-Docker: lets the master provision user containers on the host.
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - qdrant
     networks:

@@ -1,0 +1,178 @@
+"""Launch and tear down belleq-user containers via the host Docker daemon."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+
+import httpx
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class ProvisionError(Exception):
+    """Raised when a user container cannot be provisioned."""
+
+    def __init__(self, message: str, *, status_code: int = 500) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _docker_client():
+    """Return a docker client bound to the mounted socket.
+
+    Imported lazily so the rest of the master still works when the docker
+    SDK or socket is unavailable (the error surfaces only on provisioning).
+    """
+    try:
+        import docker
+    except ImportError as e:  # pragma: no cover - dependency missing
+        raise ProvisionError(
+            "docker SDK not installed in the master image", status_code=500
+        ) from e
+    try:
+        return docker.from_env()
+    except Exception as e:  # noqa: BLE001
+        raise ProvisionError(
+            "Cannot reach the Docker daemon. Mount /var/run/docker.sock into "
+            "the master container.",
+            status_code=503,
+        ) from e
+
+
+def _container_env(*, container_name: str, api_key: str, user_id: str) -> dict[str, str]:
+    """Environment passed to the spawned user container.
+
+    Mirrors the master's own vector DB and embedding settings so the new
+    container talks to the same qdrant and embedding backend over belleq-net.
+    """
+    env = {
+        "USER_ID": user_id or container_name,
+        "DISPLAY_NAME": container_name,
+        "CONTAINER_TYPE": "user",
+        "DATA_DIR": "/app/data",
+        "MASTER_API_KEY": settings.admin_api_key or "",
+        "USER_API_KEY": api_key or "",
+        "VECTORDB_BACKEND": settings.vectordb_backend,
+        "QDRANT_URL": settings.qdrant_url,
+        "QDRANT_API_KEY": settings.qdrant_api_key or "",
+        "QDRANT_COLLECTION": settings.qdrant_collection,
+        "EMBEDDING_BACKEND": settings.embedding_backend,
+        "OLLAMA_BASE_URL": settings.ollama_base_url,
+        "OLLAMA_EMBED_MODEL": settings.ollama_embed_model,
+        "EMBEDDING_VECTOR_SIZE": str(settings.embedding_vector_size),
+        "OPENAI_API_KEY": settings.openai_api_key or "",
+        "OPENAI_EMBED_MODEL": settings.openai_embed_model,
+        "MCP_ENABLED": "true",
+        "APP_HOST": "0.0.0.0",
+        "APP_PORT": str(settings.user_container_port),
+        "LOG_LEVEL": "INFO",
+    }
+    if settings.vectordb_backend.strip().lower() == "pinecone":
+        env["PINECONE_API_KEY"] = settings.pinecone_api_key or ""
+        env["PINECONE_INDEX_NAME"] = settings.pinecone_index_name or ""
+        env["PINECONE_ENVIRONMENT"] = settings.pinecone_environment or ""
+        env["PINECONE_CLOUD"] = settings.pinecone_cloud or "aws"
+    return env
+
+
+def _run_container(container_name: str, env: dict[str, str], user_id: str) -> str:
+    """Blocking docker run. Returns the new container's docker id."""
+    from docker.errors import APIError, ImageNotFound
+
+    client = _docker_client()
+
+    # Remove any stale container with the same name (e.g. failed prior attempt).
+    try:
+        stale = client.containers.get(container_name)
+        logger.info("removing_stale_container name=%s", container_name)
+        stale.remove(force=True)
+    except Exception:  # noqa: BLE001 - not found is the common, fine case
+        pass
+
+    try:
+        container = client.containers.run(
+            image=settings.user_container_image,
+            name=container_name,
+            detach=True,
+            network=settings.belleq_network,
+            environment=env,
+            volumes={f"{container_name}-data": {"bind": "/app/data", "mode": "rw"}},
+            restart_policy={"Name": "on-failure"},
+            labels={"belleq.role": "user-container", "belleq.user_id": user_id or ""},
+        )
+    except ImageNotFound as e:
+        raise ProvisionError(
+            f"Image '{settings.user_container_image}' not found on the host. "
+            f"Build it first: docker build -t {settings.user_container_image} "
+            f"path/to/belleq-user",
+            status_code=422,
+        ) from e
+    except APIError as e:
+        raise ProvisionError(f"Docker API error: {e}", status_code=502) from e
+
+    logger.info("user_container_started name=%s id=%s", container_name, container.id[:12])
+    return container.id
+
+
+async def _wait_healthy(base_url: str, timeout: float) -> bool:
+    """Poll the new container's /health until ok or timeout."""
+    deadline = time.monotonic() + timeout
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        while time.monotonic() < deadline:
+            try:
+                r = await client.get(f"{base_url}/health")
+                if r.status_code == 200:
+                    return True
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(2.0)
+    return False
+
+
+async def provision_user_container(
+    *, container_name: str, api_key: str, user_id: str
+) -> dict:
+    """Launch a user container on belleq-net and wait for it to be healthy.
+
+    Returns dict with docker_id, base_url, port, healthy. Raises ProvisionError
+    on docker-level failures.
+    """
+    env = _container_env(container_name=container_name, api_key=api_key, user_id=user_id)
+    docker_id = await asyncio.to_thread(_run_container, container_name, env, user_id)
+    base_url = f"http://{container_name}:{settings.user_container_port}"
+    healthy = await _wait_healthy(base_url, settings.user_container_health_timeout)
+    if not healthy:
+        logger.warning(
+            "user_container_unhealthy_after_timeout name=%s base_url=%s",
+            container_name,
+            base_url,
+        )
+    return {
+        "docker_id": docker_id,
+        "base_url": base_url,
+        "port": settings.user_container_port,
+        "healthy": healthy,
+    }
+
+
+def _remove_container(container_name: str) -> None:
+    """Blocking docker stop+remove (and its data volume)."""
+    client = _docker_client()
+    try:
+        c = client.containers.get(container_name)
+        c.remove(force=True)
+        logger.info("user_container_removed name=%s", container_name)
+    except Exception:  # noqa: BLE001 - already gone is fine
+        logger.info("user_container_not_present_on_delete name=%s", container_name)
+    try:
+        client.volumes.get(f"{container_name}-data").remove(force=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def delete_user_container(container_name: str) -> None:
+    await asyncio.to_thread(_remove_container, container_name)
