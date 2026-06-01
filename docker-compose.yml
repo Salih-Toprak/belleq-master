@@ -9,6 +9,9 @@ services:
     restart: always
 
   master:
+    # Published by CI to GHCR. `docker compose pull` fetches this image;
+    # `docker compose up --build` (local dev) rebuilds and tags it.
+    image: ghcr.io/salih-toprak/belleq-master:latest
     build: .
     container_name: belleq-master
     ports:
