@@ -16,20 +16,31 @@ Key implementation details
 * The sub-app's lifespan (which initialises FastMCP's session-manager task
   group) is entered in a long-lived background task rather than from within
   a request, preventing "Task group is not initialized" errors.
+* CORS headers are injected directly in this ASGI callable because mounted
+  sub-apps do NOT inherit middleware from the parent FastAPI app.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 from typing import Any
 
 from app.mcp_connectors.registry import MCPConnectorRegistry
-from app.mcp_connectors.upstream import build_client
+from app.mcp_connectors.upstream import build_client, ensure_fresh_token
 
 logger = logging.getLogger(__name__)
+
+# CORS headers applied to every response from the MCP endpoint.
+_CORS_HEADERS: list[tuple[bytes, bytes]] = [
+    (b"access-control-allow-origin", b"*"),
+    (b"access-control-allow-methods", b"GET, POST, DELETE, OPTIONS"),
+    (b"access-control-allow-headers", b"*"),
+    (b"access-control-max-age", b"86400"),
+]
 
 
 def _safe_namespace(connector_id: str) -> str:
@@ -118,18 +129,29 @@ class ContainerMCPDispatcher:
         for c in connectors:
             token = (c.oauth or {}).get("access_token", "")
             updated = c.updated_at.isoformat() if c.updated_at else ""
-            parts.append(f"{c.connector_id}|{c.transport}|{c.url}|{bool(token)}|{updated}")
+            expires = str((c.oauth or {}).get("expires_at", ""))
+            parts.append(
+                f"{c.connector_id}|{c.transport}|{c.url}|{bool(token)}|{updated}|{expires}"
+            )
         raw = "\n".join(sorted(parts))
         return hashlib.sha256(raw.encode()).hexdigest()
 
-    def _build_proxy(self, container_id: str, connectors: list):
-        """Construct (sync) a FastMCP server aggregating the connectors."""
+    async def _build_proxy(self, container_id: str, connectors: list):
+        """Construct a FastMCP server aggregating the connectors.
+
+        Auto-refreshes expired OAuth tokens before building.
+        """
         from fastmcp import FastMCP
         from fastmcp.server import create_proxy
 
         parent = FastMCP(name=f"belleq-{container_id}")
-        for conn in connectors:
+
+        for i, conn in enumerate(connectors):
             try:
+                # Auto-refresh expired tokens.
+                conn = await ensure_fresh_token(conn, registry=self._registry)
+                connectors[i] = conn  # update the list for signature recalc
+
                 sub = create_proxy(build_client(conn))
                 parent.mount(sub, namespace=_safe_namespace(conn.connector_id))
             except Exception:  # noqa: BLE001
@@ -155,11 +177,11 @@ class ContainerMCPDispatcher:
             if entry is not None:
                 await entry.close()
 
-            proxy = self._build_proxy(container_id, connectors)
+            proxy = await self._build_proxy(container_id, connectors)
             # Serve at "/" — we rewrite scope["path"] to "/" before delegating.
             asgi_app = proxy.http_app(path="/", stateless_http=True)
 
-            new_entry = _Entry(asgi_app, signature)
+            new_entry = _Entry(asgi_app, self._signature(connectors))
             await new_entry.start_lifespan()
 
             self._cache[container_id] = new_entry
@@ -179,6 +201,9 @@ class ContainerMCPDispatcher:
         receives ``scope["path"] == "/{container_id}"``, extracts the id,
         rewrites the scope to ``path="/"`` + ``scope["app"] = sub_app``, and
         delegates to the per-container Starlette ASGI app.
+
+        CORS headers are injected here because mounted sub-apps do NOT
+        inherit middleware from the parent FastAPI app.
         """
         dispatcher = self
 
@@ -190,17 +215,51 @@ class ContainerMCPDispatcher:
                 return
 
             path = scope.get("path", "") or "/"
+            method = scope.get("method", "GET").upper()
             segments = [s for s in path.split("/") if s]
+
+            # --- CORS preflight -------------------------------------------
+            if method == "OPTIONS":
+                await _send_cors_preflight(send)
+                return
+
             if not segments:
-                await _send_plain(send, 404, "Specify a container: /mcp/{container_id}")
+                await _send_json(
+                    send,
+                    404,
+                    {"error": "Specify a container: /mcp/{container_id}"},
+                )
                 return
 
             container_id = segments[0]
+
+            # --- GET /mcp/{container_id} — info / discovery ---------------
+            if method == "GET":
+                conns = dispatcher._registry.enabled_connectors_for_container(
+                    container_id
+                )
+                await _send_json(
+                    send,
+                    200,
+                    {
+                        "container_id": container_id,
+                        "connectors": len(conns),
+                        "connector_ids": [c.connector_id for c in conns],
+                        "hint": "POST to this URL with MCP JSON-RPC to use tools.",
+                    },
+                )
+                return
+
+            # --- POST/DELETE — MCP protocol (JSON-RPC) --------------------
             try:
                 entry = await dispatcher._ensure_container(container_id)
             except Exception as exc:  # noqa: BLE001
-                logger.exception("aggregator_build_failed container=%s", container_id)
-                await _send_plain(send, 502, f"Aggregator error: {exc}")
+                logger.exception(
+                    "aggregator_build_failed container=%s", container_id
+                )
+                await _send_json(
+                    send, 502, {"error": f"Aggregator error: {exc}"}
+                )
                 return
 
             # Rewrite the scope so the per-container app (which serves at "/")
@@ -211,7 +270,8 @@ class ContainerMCPDispatcher:
             child_scope["root_path"] = scope.get("root_path", "") + f"/{container_id}"
             child_scope["app"] = entry.app
 
-            await entry.app(child_scope, receive, send)
+            # Wrap `send` to inject CORS headers into responses.
+            await entry.app(child_scope, receive, _cors_send(send))
 
         return _app
 
@@ -224,6 +284,20 @@ class ContainerMCPDispatcher:
 
 # --- helpers -----------------------------------------------------------------
 
+
+def _cors_send(real_send):
+    """Wrap the ASGI send callable to inject CORS headers."""
+
+    async def send(message: dict) -> None:
+        if message["type"] == "http.response.start":
+            headers = list(message.get("headers", []))
+            headers.extend(_CORS_HEADERS)
+            message = dict(message, headers=headers)
+        await real_send(message)
+
+    return send
+
+
 async def _handle_lifespan(receive, send) -> None:
     while True:
         message = await receive()
@@ -234,12 +308,31 @@ async def _handle_lifespan(receive, send) -> None:
             return
 
 
-async def _send_plain(send, status: int, body: str) -> None:
+async def _send_cors_preflight(send) -> None:
+    """Respond to an OPTIONS preflight with CORS headers and 204 No Content."""
+    headers = list(_CORS_HEADERS)
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 204,
+            "headers": headers,
+        }
+    )
+    await send({"type": "http.response.body", "body": b""})
+
+
+async def _send_json(send, status: int, body: dict) -> None:
+    """Send a JSON response with CORS headers."""
+    payload = json.dumps(body).encode()
+    headers = [
+        (b"content-type", b"application/json; charset=utf-8"),
+        *_CORS_HEADERS,
+    ]
     await send(
         {
             "type": "http.response.start",
             "status": status,
-            "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+            "headers": headers,
         }
     )
-    await send({"type": "http.response.body", "body": body.encode()})
+    await send({"type": "http.response.body", "body": payload})

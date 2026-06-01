@@ -73,6 +73,10 @@ class MCPConnectorRegistry:
     def remove_container_connector(self, container_id: str, connector_id: str) -> None:
         self._db.remove_container_connector(container_id, connector_id)
 
+    def refresh_oauth(self, connector_id: str, oauth: dict) -> MCPConnectorRecord:
+        """Persist refreshed OAuth tokens for a connector."""
+        return self.update(connector_id, {"oauth": oauth, "auth_status": "connected"})
+
     def enabled_connectors_for_container(self, container_id: str) -> list[MCPConnectorRecord]:
         """Resolve a container's whitelist to the actual enabled connector records."""
         wanted = set(self.connectors_for_container(container_id))
