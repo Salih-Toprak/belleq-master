@@ -241,7 +241,7 @@ async def test_connector(
     rec = reg.get(connector_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="Connector not found")
-    result = await test_connection(rec)
+    result = await test_connection(rec, registry=reg)
     reg.record_test_result(
         connector_id,
         status="ok" if result["ok"] else "error",

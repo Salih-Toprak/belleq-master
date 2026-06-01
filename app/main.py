@@ -11,6 +11,7 @@ from fastapi.exception_handlers import (
     request_validation_exception_handler,
 )
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api import (
@@ -169,6 +170,17 @@ unless `ADMIN_API_KEY` is empty (development mode).
 """,
     version="0.1.0",
     lifespan=lifespan,
+)
+
+# CORS — allow any origin so the dashboard and browser-based MCP clients
+# can reach the admin API.  The /mcp sub-app mount handles CORS separately
+# (mounted sub-apps do NOT inherit this middleware).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(vectordb_routes.router)
