@@ -82,8 +82,13 @@ class Settings(BaseSettings):
         description="Port the user container listens on inside the network.",
     )
     user_container_health_timeout: float = Field(
-        default=90.0,
-        description="Seconds to wait for a freshly provisioned container's /health.",
+        default=15.0,
+        description=(
+            "Seconds to wait inline for a freshly provisioned container's /health. "
+            "Kept under the platform proxy's 30s budget — if the container is not "
+            "ready in time, provision returns status=starting and the registry "
+            "health check picks it up shortly after."
+        ),
     )
 
 
