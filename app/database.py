@@ -128,9 +128,21 @@ mcp_connectors = Table(
     Column("last_error", Text, nullable=False, server_default=""),
     Column("last_checked_at", DateTime, nullable=True),
     Column("tool_count", Integer, nullable=False, server_default="0"),
+    Column("auth_status", String, nullable=False, server_default="none"),
     Column("added_at", DateTime, nullable=False),
     Column("updated_at", DateTime, nullable=False),
     Column("metadata_json", Text, nullable=False, server_default="{}"),
+)
+
+# In-flight OAuth authorization-code exchanges, keyed by the `state` param.
+mcp_oauth_state = Table(
+    "mcp_oauth_state",
+    metadata,
+    Column("state", String, primary_key=True),
+    Column("connector_id", String, nullable=False),
+    # code_verifier + client registration + endpoints (secret), encrypted.
+    Column("payload_json", Text, nullable=False, server_default="{}"),
+    Column("created_at", DateTime, nullable=False),
 )
 
 # Per-container connector whitelist (which connectors a container may see).
@@ -182,7 +194,34 @@ class MasterDB:
             connect_args={"check_same_thread": False} if url.startswith("sqlite") else {},
         )
         metadata.create_all(self._engine)
+        self._run_lightweight_migrations()
         logger.info("master_db_initialized url=%s", url)
+
+    def _run_lightweight_migrations(self) -> None:
+        """Add columns introduced after a table was first created (SQLite).
+
+        ``metadata.create_all`` never alters an existing table, so new columns
+        on already-created tables must be added explicitly. Idempotent.
+        """
+        from sqlalchemy import text
+
+        wanted = {
+            "mcp_connectors": [("auth_status", "TEXT NOT NULL DEFAULT 'none'")],
+        }
+        with self._engine.begin() as conn:
+            for table, cols in wanted.items():
+                existing = {
+                    row[1]
+                    for row in conn.execute(text(f"PRAGMA table_info({table})"))
+                }
+                if not existing:
+                    continue  # table not created yet (fresh DB handles via create_all)
+                for col_name, col_ddl in cols:
+                    if col_name not in existing:
+                        conn.execute(
+                            text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_ddl}")
+                        )
+                        logger.info("migrated_add_column table=%s col=%s", table, col_name)
 
     @property
     def engine(self) -> Engine:
@@ -661,6 +700,7 @@ class MasterDB:
         secrets = unpack_credentials(row.secrets_json or "{}", self._credential_encryption_key)
         headers = secrets.get("headers") if isinstance(secrets.get("headers"), dict) else {}
         env = secrets.get("env") if isinstance(secrets.get("env"), dict) else {}
+        oauth = secrets.get("oauth") if isinstance(secrets.get("oauth"), dict) else {}
         return MCPConnectorRecord(
             connector_id=row.connector_id,
             display_name=row.display_name or "",
@@ -677,6 +717,8 @@ class MasterDB:
             last_error=row.last_error or "",
             last_checked_at=row.last_checked_at,
             tool_count=int(row.tool_count or 0),
+            auth_status=(getattr(row, "auth_status", None) or "none"),
+            oauth=oauth,
             metadata=meta,
         )
 
@@ -685,7 +727,11 @@ class MasterDB:
         added = record.added_at or now
         updated = record.updated_at or now
         secrets_stored = pack_credentials(
-            {"headers": record.headers or {}, "env": record.env or {}},
+            {
+                "headers": record.headers or {},
+                "env": record.env or {},
+                "oauth": record.oauth or {},
+            },
             self._credential_encryption_key,
         )
         return {
@@ -701,6 +747,7 @@ class MasterDB:
             "last_error": record.last_error or "",
             "last_checked_at": record.last_checked_at,
             "tool_count": int(record.tool_count or 0),
+            "auth_status": record.auth_status or "none",
             "added_at": added,
             "updated_at": updated,
             "metadata_json": json.dumps(record.metadata or {}),
@@ -742,11 +789,13 @@ class MasterDB:
         now = datetime.now(timezone.utc)
         payload: dict[str, Any] = {"updated_at": now}
         # Secrets travel together; re-pack from the merged view.
-        if "headers" in updates or "env" in updates:
+        if "headers" in updates or "env" in updates or "oauth" in updates:
             headers = updates.get("headers", current.headers) or {}
             env = updates.get("env", current.env) or {}
+            oauth = updates.get("oauth", current.oauth) or {}
             payload["secrets_json"] = pack_credentials(
-                {"headers": headers, "env": env}, self._credential_encryption_key
+                {"headers": headers, "env": env, "oauth": oauth},
+                self._credential_encryption_key,
             )
         if "args" in updates:
             payload["args_json"] = json.dumps(updates["args"] or [])
@@ -762,6 +811,7 @@ class MasterDB:
             "last_error",
             "last_checked_at",
             "tool_count",
+            "auth_status",
         ):
             if fld in updates:
                 payload[fld] = updates[fld]
@@ -787,6 +837,37 @@ class MasterDB:
                 delete(mcp_connectors).where(mcp_connectors.c.connector_id == connector_id)
             )
         logger.info("mcp_connector_removed connector_id=%s", connector_id)
+
+    # --- OAuth in-flight state ----------------------------------------
+
+    def save_oauth_state(self, state: str, connector_id: str, payload: dict[str, Any]) -> None:
+        """Persist a pending OAuth exchange (code_verifier, client info, endpoints)."""
+        now = datetime.now(timezone.utc)
+        stored = pack_credentials(payload or {}, self._credential_encryption_key)
+        with self._engine.begin() as conn:
+            conn.execute(delete(mcp_oauth_state).where(mcp_oauth_state.c.state == state))
+            conn.execute(
+                insert(mcp_oauth_state).values(
+                    state=state,
+                    connector_id=connector_id,
+                    payload_json=stored,
+                    created_at=now,
+                )
+            )
+
+    def get_oauth_state(self, state: str) -> dict[str, Any] | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(mcp_oauth_state).where(mcp_oauth_state.c.state == state)
+            ).mappings().first()
+        if row is None:
+            return None
+        payload = unpack_credentials(row["payload_json"] or "{}", self._credential_encryption_key)
+        return {"connector_id": row["connector_id"], "payload": payload, "created_at": row["created_at"]}
+
+    def delete_oauth_state(self, state: str) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(delete(mcp_oauth_state).where(mcp_oauth_state.c.state == state))
 
     # --- Per-container connector whitelist ----------------------------
 

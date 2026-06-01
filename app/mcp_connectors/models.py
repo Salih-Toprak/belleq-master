@@ -38,6 +38,12 @@ class MCPConnectorRecord:
     last_error: str = ""
     last_checked_at: datetime | None = None
     tool_count: int = 0
+    # OAuth: "none" (no auth needed), "pending" (authorize started),
+    # "connected" (have a token), "error".
+    auth_status: str = "none"
+    # OAuth material (tokens + client registration), stored encrypted at rest.
+    # e.g. {access_token, refresh_token, expires_at, token_endpoint, client_id, ...}
+    oauth: dict = field(default_factory=dict)
     metadata: dict = field(default_factory=dict)
 
 
