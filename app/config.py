@@ -70,8 +70,15 @@ class Settings(BaseSettings):
 
     # User container provisioning (Docker-out-of-Docker via mounted socket)
     user_container_image: str = Field(
-        default="belleq-user:latest",
-        description="Image used when provisioning a new user container.",
+        default="ghcr.io/salih-toprak/belleq-user:latest",
+        description=(
+            "Image used when provisioning a user container. Pulled on demand if "
+            "not present on the host (published by belleq-user CI to GHCR)."
+        ),
+    )
+    user_container_always_pull: bool = Field(
+        default=False,
+        description="Always pull the image before run (gets the newest :latest).",
     )
     belleq_network: str = Field(
         default="belleq-net",
