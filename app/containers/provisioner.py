@@ -79,11 +79,45 @@ def _container_env(*, container_name: str, api_key: str, user_id: str) -> dict[s
     return env
 
 
+def _ensure_image(client) -> None:
+    """Pull the user image if it isn't already on the host.
+
+    Auto-pull means the host never needs a manual clone/build — the image
+    is published to GHCR by belleq-user CI and fetched on first use.
+    """
+    from docker.errors import APIError, ImageNotFound
+
+    image = settings.user_container_image
+    if not settings.user_container_always_pull:
+        try:
+            client.images.get(image)
+            return
+        except ImageNotFound:
+            pass
+    logger.info("pulling_user_image image=%s", image)
+    try:
+        client.images.pull(image)
+    except ImageNotFound as e:
+        raise ProvisionError(
+            f"Image '{image}' not found in the registry. Has belleq-user CI "
+            f"published it, and is the package public (or the host logged into "
+            f"the registry)?",
+            status_code=422,
+        ) from e
+    except APIError as e:
+        raise ProvisionError(
+            f"Could not pull '{image}': {e}. If the package is private, run "
+            f"`docker login ghcr.io` on the host.",
+            status_code=502,
+        ) from e
+
+
 def _run_container(container_name: str, env: dict[str, str], user_id: str) -> str:
     """Blocking docker run. Returns the new container's docker id."""
     from docker.errors import APIError, ImageNotFound
 
     client = _docker_client()
+    _ensure_image(client)
 
     # Remove any stale container with the same name (e.g. failed prior attempt).
     try:
