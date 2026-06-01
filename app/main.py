@@ -23,6 +23,7 @@ from app.api import (
     sources_routes,
     vectordb_routes,
 )
+from app.mcp_aggregator.dispatcher import ContainerMCPDispatcher
 from app.mcp_connectors.registry import MCPConnectorRegistry
 from app.clients.container_client import ContainerClient
 from app.config import settings
@@ -117,6 +118,12 @@ async def lifespan(app: FastAPI):
     conns = mcp_connector_registry.list_all(enabled_only=False)
     logger.info("mcp_connector_registry_loaded connectors=%s", len(conns))
 
+    # Per-container aggregated MCP endpoint at /mcp/{container_id}.
+    mcp_dispatcher = ContainerMCPDispatcher(mcp_connector_registry)
+    app.mount("/mcp", mcp_dispatcher.as_asgi())
+    app.state.mcp_dispatcher = mcp_dispatcher
+    logger.info("mcp_aggregator_mounted path=/mcp/{container_id}")
+
     pipeline = IngestionPipeline(
         vectordb=app.state.vectordb,
         embedder=app.state.embedder,
@@ -135,6 +142,7 @@ async def lifespan(app: FastAPI):
     logger.info("belleq_master_ready host=%s port=%s", settings.app_host, settings.app_port)
     yield
 
+    await mcp_dispatcher.aclose()
     scheduler.stop()
     emb = getattr(app.state, "embedder", None)
     if emb is not None and hasattr(emb, "aclose"):
