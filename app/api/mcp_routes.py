@@ -8,6 +8,7 @@ redacted on every read.
 from __future__ import annotations
 
 import logging
+import secrets as _secrets
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_registry, require_admin
+from app.mcp_connectors import oauth
 from app.mcp_connectors.models import VALID_TRANSPORTS, MCPConnectorRecord
 from app.mcp_connectors.registry import MCPConnectorRegistry
 from app.mcp_connectors.upstream import test_connection
@@ -48,6 +50,7 @@ def _connector_to_public(rec: MCPConnectorRecord) -> dict[str, Any]:
         "last_error": rec.last_error or "",
         "last_checked_at": rec.last_checked_at.isoformat() if rec.last_checked_at else None,
         "tool_count": rec.tool_count,
+        "auth_status": rec.auth_status or "none",
         "added_at": rec.added_at.isoformat() if rec.added_at else None,
         "updated_at": rec.updated_at.isoformat() if rec.updated_at else None,
         "metadata": rec.metadata or {},
@@ -245,7 +248,136 @@ async def test_connector(
         error=result.get("error", ""),
         tool_count=result.get("tool_count", 0),
     )
+    # Persist the transport that actually worked so the aggregator reuses it.
+    detected = result.get("transport")
+    if result["ok"] and detected and detected != rec.transport:
+        reg.update(connector_id, {"transport": detected})
     return result
+
+
+# --- OAuth ("Connect") ------------------------------------------------
+
+
+class AuthorizeBody(BaseModel):
+    # The dashboard's own callback URL (its origin handles HTTPS/localhost).
+    redirect_uri: str = Field(..., description="Where the provider returns the user.")
+
+
+class ExchangeBody(BaseModel):
+    state: str
+    code: str
+
+
+@router.post("/connectors/{connector_id}/authorize", summary="Begin OAuth for a connector")
+async def authorize_connector(
+    connector_id: str,
+    body: AuthorizeBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict:
+    """Discover the connector's OAuth server, register a client, and return an
+    authorization URL for the user's browser. If the server needs no auth, the
+    connector is marked connected immediately.
+    """
+    reg = _get_connector_registry(request)
+    rec = reg.get(connector_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    try:
+        meta = await oauth.discover(rec.url)
+    except oauth.OAuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+
+    if not meta.get("auth_required"):
+        reg.update(connector_id, {"auth_status": "none"})
+        return {"auth_required": False, "connector_id": connector_id}
+
+    if not meta.get("registration_endpoint"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This server requires OAuth but does not support dynamic client "
+                "registration. Manual client setup isn't wired up yet."
+            ),
+        )
+
+    try:
+        client = await oauth.register_client(meta["registration_endpoint"], body.redirect_uri)
+    except oauth.OAuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+
+    verifier, challenge = oauth.make_pkce()
+    state = _secrets.token_urlsafe(24)
+    auth_url = oauth.build_authorization_url(
+        authorization_endpoint=meta["authorization_endpoint"],
+        client_id=client["client_id"],
+        redirect_uri=body.redirect_uri,
+        state=state,
+        code_challenge=challenge,
+        scopes=meta.get("scopes_supported", []),
+        resource=meta.get("resource", ""),
+    )
+
+    request.app.state.db.save_oauth_state(
+        state,
+        connector_id,
+        {
+            "code_verifier": verifier,
+            "client_id": client["client_id"],
+            "client_secret": client.get("client_secret", ""),
+            "token_endpoint": meta.get("token_endpoint", ""),
+            "redirect_uri": body.redirect_uri,
+            "resource": meta.get("resource", ""),
+        },
+    )
+    reg.update(connector_id, {"auth_status": "pending"})
+    return {"auth_required": True, "authorization_url": auth_url, "state": state}
+
+
+@router.post("/oauth/exchange", summary="Complete OAuth (code -> tokens)")
+async def oauth_exchange(
+    body: ExchangeBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict:
+    """Called by the dashboard callback with the ?code&state from the provider."""
+    db = request.app.state.db
+    saved = db.get_oauth_state(body.state)
+    if saved is None:
+        raise HTTPException(status_code=400, detail="Unknown or expired OAuth state")
+    p = saved["payload"]
+    reg = _get_connector_registry(request)
+    connector_id = saved["connector_id"]
+
+    try:
+        tokens = await oauth.exchange_code(
+            token_endpoint=p["token_endpoint"],
+            client_id=p["client_id"],
+            client_secret=p.get("client_secret", ""),
+            code=body.code,
+            redirect_uri=p["redirect_uri"],
+            code_verifier=p["code_verifier"],
+            resource=p.get("resource", ""),
+        )
+    except oauth.OAuthError as e:
+        reg.update(connector_id, {"auth_status": "error"})
+        db.delete_oauth_state(body.state)
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+
+    # Persist tokens + the client info needed for later refresh.
+    tokens.update(
+        {
+            "client_id": p["client_id"],
+            "client_secret": p.get("client_secret", ""),
+            "token_endpoint": p["token_endpoint"],
+            "resource": p.get("resource", ""),
+        }
+    )
+    reg.update(connector_id, {"oauth": tokens, "auth_status": "connected"})
+    db.delete_oauth_state(body.state)
+    logger.info("oauth_connected connector_id=%s", connector_id)
+    return {"connector_id": connector_id, "auth_status": "connected"}
 
 
 # --- Per-container whitelist ------------------------------------------
