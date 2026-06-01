@@ -18,21 +18,13 @@ logger = logging.getLogger(__name__)
 _HTTP_TRANSPORTS = ("streamable_http", "sse")
 
 
-def _effective_headers(record: MCPConnectorRecord) -> dict[str, str]:
-    """Merge explicit headers with an OAuth bearer token if present."""
-    headers = dict(record.headers or {})
-    token = (record.oauth or {}).get("access_token")
-    if token and "Authorization" not in headers:
-        token_type = (record.oauth or {}).get("token_type") or "Bearer"
-        headers["Authorization"] = f"{token_type} {token}"
-    return headers
-
-
 def build_client(record: MCPConnectorRecord, *, transport: str | None = None):
     """Return a configured ``fastmcp.Client`` for this connector.
 
-    fastmcp is imported lazily so the rest of the master imports cleanly even
-    where fastmcp is not installed.
+    In FastMCP 3.x, pass OAuth tokens via ``auth=<token_string>`` rather than
+    injecting an Authorization header manually. FastMCP treats a plain string
+    as a Bearer token and handles 401 retries correctly; manually-set headers
+    can be overridden by FastMCP's own auth flow.
     """
     from fastmcp import Client
     from fastmcp.client.transports import (
@@ -55,10 +47,27 @@ def build_client(record: MCPConnectorRecord, *, transport: str | None = None):
 
     if not record.url:
         raise ValueError(f"{t} connector requires a url")
-    headers = _effective_headers(record)
+
+    # Use the OAuth access token via FastMCP's `auth=` parameter (bearer string).
+    # Only fall back to explicit headers for non-OAuth connectors.
+    access_token = (record.oauth or {}).get("access_token")
+    extra_headers = dict(record.headers or {})
+
     if t == "sse":
-        return Client(SSETransport(url=record.url, headers=headers))
-    return Client(StreamableHttpTransport(url=record.url, headers=headers))
+        return Client(
+            SSETransport(
+                url=record.url,
+                headers=extra_headers or None,
+                auth=access_token or None,
+            )
+        )
+    return Client(
+        StreamableHttpTransport(
+            url=record.url,
+            headers=extra_headers or None,
+            auth=access_token or None,
+        )
+    )
 
 
 async def _list_tools_via(record: MCPConnectorRecord, transport: str) -> list[str]:
