@@ -178,8 +178,8 @@ class ContainerMCPDispatcher:
                 await entry.close()
 
             proxy = await self._build_proxy(container_id, connectors)
-            # Serve at "/" — we rewrite scope["path"] to "/" before delegating.
-            asgi_app = proxy.http_app(path="/", stateless_http=True)
+            # Serve at "/" using the standard SSE transport.
+            asgi_app = proxy.http_app(transport="sse", path="/")
 
             new_entry = _Entry(asgi_app, self._signature(connectors))
             await new_entry.start_lifespan()
@@ -199,8 +199,8 @@ class ContainerMCPDispatcher:
 
         Mounted at ``/mcp``, so Starlette strips that prefix.  This function
         receives ``scope["path"] == "/{container_id}"``, extracts the id,
-        rewrites the scope to ``path="/"`` + ``scope["app"] = sub_app``, and
-        delegates to the per-container Starlette ASGI app.
+        rewrites the scope to proper sub-paths, and delegates to the
+        per-container Starlette ASGI app.
 
         CORS headers are injected here because mounted sub-apps do NOT
         inherit middleware from the parent FastAPI app.
@@ -233,8 +233,8 @@ class ContainerMCPDispatcher:
 
             container_id = segments[0]
 
-            # --- GET /mcp/{container_id} — info / discovery ---------------
-            if method == "GET":
+            # --- GET /mcp/{container_id}/info — info / discovery ---------------
+            if method == "GET" and len(segments) > 1 and segments[1] == "info":
                 conns = dispatcher._registry.enabled_connectors_for_container(
                     container_id
                 )
@@ -245,12 +245,12 @@ class ContainerMCPDispatcher:
                         "container_id": container_id,
                         "connectors": len(conns),
                         "connector_ids": [c.connector_id for c in conns],
-                        "hint": "POST to this URL with MCP JSON-RPC to use tools.",
+                        "hint": "This is an aggregated MCP endpoint. Connect your MCP client using standard SSE.",
                     },
                 )
                 return
 
-            # --- POST/DELETE — MCP protocol (JSON-RPC) --------------------
+            # --- MCP protocol (SSE & Message Posting) --------------------
             try:
                 entry = await dispatcher._ensure_container(container_id)
             except Exception as exc:  # noqa: BLE001
@@ -262,11 +262,19 @@ class ContainerMCPDispatcher:
                 )
                 return
 
-            # Rewrite the scope so the per-container app (which serves at "/")
-            # sees a root-level request.  Also fix scope["app"] to point at the
-            # sub-app instead of the outer FastAPI instance.
+            # Rewrite the scope path by stripping the container_id prefix
+            # e.g., "/belleq-user-a0372541" -> "/"
+            # e.g., "/belleq-user-a0372541/messages/" -> "/messages/"
+            prefix = f"/{container_id}"
+            if path.startswith(prefix):
+                child_path = path[len(prefix):]
+            else:
+                child_path = path
+            if not child_path.startswith("/"):
+                child_path = "/" + child_path
+
             child_scope = dict(scope)
-            child_scope["path"] = "/"
+            child_scope["path"] = child_path
             child_scope["root_path"] = scope.get("root_path", "") + f"/{container_id}"
             child_scope["app"] = entry.app
 
