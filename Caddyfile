@@ -1,6 +1,8 @@
-mcp.belleq.app {
-	# Caddy auto-fetches a Let's Encrypt cert for mcp.belleq.app.
-	# The only requirement: this EC2 must be reachable on port 443 from the
-	# internet (add an inbound rule in the EC2 security group if needed).
+# NOTE: The PUBLIC MCP endpoint is served by the platform backend
+# (mcp.belleq.app -> backend -> this master). The master itself stays plain
+# HTTP on :9000, reached privately by the backend — it does NOT need a public
+# domain/cert. This file is kept only for optional standalone/local TLS testing.
+:443 {
+	tls internal
 	reverse_proxy master:9000
 }
