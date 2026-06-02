@@ -178,8 +178,10 @@ class ContainerMCPDispatcher:
                 await entry.close()
 
             proxy = await self._build_proxy(container_id, connectors)
-            # Serve at "/" using the standard SSE transport.
-            asgi_app = proxy.http_app(transport="sse", path="/")
+            # Serve at "/" with streamable HTTP (single endpoint; avoids SSE's
+            # message-endpoint-URL/root_path complications behind our dispatcher).
+            # Stateless: each request is independent.
+            asgi_app = proxy.http_app(path="/", stateless_http=True)
 
             new_entry = _Entry(asgi_app, self._signature(connectors))
             await new_entry.start_lifespan()
@@ -214,9 +216,17 @@ class ContainerMCPDispatcher:
             if scope["type"] != "http":
                 return
 
-            path = scope.get("path", "") or "/"
+            # Starlette's Mount sets root_path to the mount prefix ("/mcp") but
+            # keeps the FULL path in scope["path"] (e.g. "/mcp/{id}"). Strip the
+            # root_path ourselves to get the path relative to the mount.
+            full_path = scope.get("path", "") or "/"
+            root = scope.get("root_path", "") or ""
+            rel = full_path[len(root):] if root and full_path.startswith(root) else full_path
+            if not rel.startswith("/"):
+                rel = "/" + rel
+
             method = scope.get("method", "GET").upper()
-            segments = [s for s in path.split("/") if s]
+            segments = [s for s in rel.split("/") if s]
 
             # --- CORS preflight -------------------------------------------
             if method == "OPTIONS":
@@ -262,20 +272,20 @@ class ContainerMCPDispatcher:
                 )
                 return
 
-            # Rewrite the scope path by stripping the container_id prefix
-            # e.g., "/belleq-user-a0372541" -> "/"
-            # e.g., "/belleq-user-a0372541/messages/" -> "/messages/"
+            # Rewrite the (root_path-relative) path by stripping the container_id
+            # segment so the sub-app — served at "/" — matches.
+            #   rel "/{id}"            -> child_path "/"
+            #   rel "/{id}/messages/"  -> child_path "/messages/"
             prefix = f"/{container_id}"
-            if path.startswith(prefix):
-                child_path = path[len(prefix):]
-            else:
-                child_path = path
+            child_path = rel[len(prefix):] if rel.startswith(prefix) else rel
             if not child_path.startswith("/"):
                 child_path = "/" + child_path
 
             child_scope = dict(scope)
             child_scope["path"] = child_path
-            child_scope["root_path"] = scope.get("root_path", "") + f"/{container_id}"
+            child_scope["raw_path"] = child_path.encode()
+            # External prefix for any URLs the sub-app generates.
+            child_scope["root_path"] = root + prefix
             child_scope["app"] = entry.app
 
             # Wrap `send` to inject CORS headers into responses.
