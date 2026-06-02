@@ -1,5 +1,7 @@
-# Self-signed TLS for local production-style testing.
-# Replace `tls internal` with your real domain and remove `tls internal` for public HTTPS + ACME.
+# NOTE: The PUBLIC MCP endpoint is served by the platform backend
+# (mcp.belleq.app -> backend -> this master). The master itself stays plain
+# HTTP on :9000, reached privately by the backend — it does NOT need a public
+# domain/cert. This file is kept only for optional standalone/local TLS testing.
 :443 {
 	tls internal
 	reverse_proxy master:9000

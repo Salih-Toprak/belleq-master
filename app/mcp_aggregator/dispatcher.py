@@ -178,7 +178,9 @@ class ContainerMCPDispatcher:
                 await entry.close()
 
             proxy = await self._build_proxy(container_id, connectors)
-            # Serve at "/" — we rewrite scope["path"] to "/" before delegating.
+            # Serve at "/" with streamable HTTP (single endpoint; avoids SSE's
+            # message-endpoint-URL/root_path complications behind our dispatcher).
+            # Stateless: each request is independent.
             asgi_app = proxy.http_app(path="/", stateless_http=True)
 
             new_entry = _Entry(asgi_app, self._signature(connectors))
@@ -199,8 +201,8 @@ class ContainerMCPDispatcher:
 
         Mounted at ``/mcp``, so Starlette strips that prefix.  This function
         receives ``scope["path"] == "/{container_id}"``, extracts the id,
-        rewrites the scope to ``path="/"`` + ``scope["app"] = sub_app``, and
-        delegates to the per-container Starlette ASGI app.
+        rewrites the scope to proper sub-paths, and delegates to the
+        per-container Starlette ASGI app.
 
         CORS headers are injected here because mounted sub-apps do NOT
         inherit middleware from the parent FastAPI app.
@@ -214,9 +216,17 @@ class ContainerMCPDispatcher:
             if scope["type"] != "http":
                 return
 
-            path = scope.get("path", "") or "/"
+            # Starlette's Mount sets root_path to the mount prefix ("/mcp") but
+            # keeps the FULL path in scope["path"] (e.g. "/mcp/{id}"). Strip the
+            # root_path ourselves to get the path relative to the mount.
+            full_path = scope.get("path", "") or "/"
+            root = scope.get("root_path", "") or ""
+            rel = full_path[len(root):] if root and full_path.startswith(root) else full_path
+            if not rel.startswith("/"):
+                rel = "/" + rel
+
             method = scope.get("method", "GET").upper()
-            segments = [s for s in path.split("/") if s]
+            segments = [s for s in rel.split("/") if s]
 
             # --- CORS preflight -------------------------------------------
             if method == "OPTIONS":
@@ -233,8 +243,8 @@ class ContainerMCPDispatcher:
 
             container_id = segments[0]
 
-            # --- GET /mcp/{container_id} — info / discovery ---------------
-            if method == "GET":
+            # --- GET /mcp/{container_id}/info — info / discovery ---------------
+            if method == "GET" and len(segments) > 1 and segments[1] == "info":
                 conns = dispatcher._registry.enabled_connectors_for_container(
                     container_id
                 )
@@ -245,12 +255,12 @@ class ContainerMCPDispatcher:
                         "container_id": container_id,
                         "connectors": len(conns),
                         "connector_ids": [c.connector_id for c in conns],
-                        "hint": "POST to this URL with MCP JSON-RPC to use tools.",
+                        "hint": "This is an aggregated MCP endpoint. Connect your MCP client using standard SSE.",
                     },
                 )
                 return
 
-            # --- POST/DELETE — MCP protocol (JSON-RPC) --------------------
+            # --- MCP protocol (SSE & Message Posting) --------------------
             try:
                 entry = await dispatcher._ensure_container(container_id)
             except Exception as exc:  # noqa: BLE001
@@ -262,12 +272,20 @@ class ContainerMCPDispatcher:
                 )
                 return
 
-            # Rewrite the scope so the per-container app (which serves at "/")
-            # sees a root-level request.  Also fix scope["app"] to point at the
-            # sub-app instead of the outer FastAPI instance.
+            # Rewrite the (root_path-relative) path by stripping the container_id
+            # segment so the sub-app — served at "/" — matches.
+            #   rel "/{id}"            -> child_path "/"
+            #   rel "/{id}/messages/"  -> child_path "/messages/"
+            prefix = f"/{container_id}"
+            child_path = rel[len(prefix):] if rel.startswith(prefix) else rel
+            if not child_path.startswith("/"):
+                child_path = "/" + child_path
+
             child_scope = dict(scope)
-            child_scope["path"] = "/"
-            child_scope["root_path"] = scope.get("root_path", "") + f"/{container_id}"
+            child_scope["path"] = child_path
+            child_scope["raw_path"] = child_path.encode()
+            # External prefix for any URLs the sub-app generates.
+            child_scope["root_path"] = root + prefix
             child_scope["app"] = entry.app
 
             # Wrap `send` to inject CORS headers into responses.
