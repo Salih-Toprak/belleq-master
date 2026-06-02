@@ -43,6 +43,11 @@ _CORS_HEADERS: list[tuple[bytes, bytes]] = [
 ]
 
 
+# Reserved container id for the workspace endpoint: aggregates ALL of the
+# environment's enabled connectors into one "connect everything" endpoint.
+WORKSPACE_ID = "__workspace__"
+
+
 def _safe_namespace(connector_id: str) -> str:
     """Connector id -> a tool-name-safe namespace prefix."""
     ns = re.sub(r"[^a-zA-Z0-9_]", "_", connector_id).strip("_")
@@ -163,9 +168,19 @@ class ContainerMCPDispatcher:
                 )
         return parent
 
+    def _connectors_for(self, container_id: str) -> list:
+        """Connectors to expose for an endpoint.
+
+        The reserved workspace id exposes every enabled connector in the env
+        ("connect everything"); any other id is a single container's whitelist.
+        """
+        if container_id == WORKSPACE_ID:
+            return self._registry.list_all(enabled_only=True)
+        return self._registry.enabled_connectors_for_container(container_id)
+
     async def _ensure_container(self, container_id: str) -> _Entry:
         """Build (or reuse) the per-container sub-app and return its entry."""
-        connectors = self._registry.enabled_connectors_for_container(container_id)
+        connectors = self._connectors_for(container_id)
         signature = self._signature(connectors)
 
         async with self._lock:
@@ -245,9 +260,7 @@ class ContainerMCPDispatcher:
 
             # --- GET /mcp/{container_id}/info — info / discovery ---------------
             if method == "GET" and len(segments) > 1 and segments[1] == "info":
-                conns = dispatcher._registry.enabled_connectors_for_container(
-                    container_id
-                )
+                conns = dispatcher._connectors_for(container_id)
                 await _send_json(
                     send,
                     200,
