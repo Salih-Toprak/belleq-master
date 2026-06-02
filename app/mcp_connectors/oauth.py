@@ -67,36 +67,61 @@ def _parse_resource_metadata_url(www_authenticate: str) -> str | None:
 
 
 async def _probe_for_auth(client: httpx.AsyncClient, mcp_url: str) -> str | None:
-    """Hit the MCP URL; if it requires auth, return the resource-metadata URL.
+    """Decide whether the MCP server needs OAuth and where to discover it.
 
-    Returns None when the server responds without demanding auth (no OAuth
-    needed). Raising is reserved for hard failures.
+    Returns None when no auth is needed, otherwise a Protected-Resource-Metadata
+    URL (RFC 9728) or the sentinel "fallback". Robust across transports:
+    streamable HTTP servers 401 on a POST initialize, SSE servers 401 on a GET,
+    and well-behaved servers publish the metadata at a well-known path (which
+    we check first, so we don't even need to trigger a 401).
     """
-    try:
-        # A minimal MCP initialize triggers the 401 + WWW-Authenticate.
-        r = await client.post(
-            mcp_url,
-            headers={
-                "Accept": "application/json, text/event-stream",
-                "Content-Type": "application/json",
-            },
-            json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": CLIENT_NAME, "version": "0.1"},
-                },
-            },
-        )
-    except httpx.HTTPError as e:
-        raise OAuthError(f"Could not reach {mcp_url}: {e}", status_code=502) from e
+    origin = _origin(mcp_url)
+    path = urlparse(mcp_url).path or ""
 
-    if r.status_code != 401:
-        return None
-    return _parse_resource_metadata_url(r.headers.get("WWW-Authenticate", "")) or "fallback"
+    # 1) Canonical RFC 9728 well-known (path-suffixed first, then root).
+    well_known = [f"{origin}/.well-known/oauth-protected-resource"]
+    if path and path not in ("", "/"):
+        well_known.insert(0, f"{origin}/.well-known/oauth-protected-resource{path}")
+    for wk in well_known:
+        prm = await _fetch_json(client, wk)
+        if prm and prm.get("authorization_servers"):
+            return wk
+
+    # 2) Trigger a 401 + WWW-Authenticate. POST initialize (streamable HTTP),
+    #    then GET (SSE) — different transports surface the 401 differently.
+    init_body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": CLIENT_NAME, "version": "0.1"},
+        },
+    }
+    reachable = False
+    for method in ("POST", "GET"):
+        try:
+            if method == "POST":
+                r = await client.post(
+                    mcp_url,
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        "Content-Type": "application/json",
+                    },
+                    json=init_body,
+                )
+            else:
+                r = await client.get(mcp_url, headers={"Accept": "text/event-stream"})
+        except httpx.HTTPError:
+            continue
+        reachable = True
+        if r.status_code == 401:
+            return _parse_resource_metadata_url(r.headers.get("WWW-Authenticate", "")) or "fallback"
+
+    if not reachable:
+        raise OAuthError(f"Could not reach {mcp_url}", status_code=502)
+    return None
 
 
 async def _fetch_json(client: httpx.AsyncClient, url: str) -> dict | None:
