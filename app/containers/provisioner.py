@@ -43,12 +43,22 @@ def _docker_client():
         ) from e
 
 
-def _container_env(*, container_name: str, api_key: str, user_id: str) -> dict[str, str]:
+def _container_env(
+    *,
+    container_name: str,
+    api_key: str,
+    user_id: str,
+    qdrant_collection: str | None = None,
+    vector_db: dict | None = None,
+) -> dict[str, str]:
     """Environment passed to the spawned user container.
 
-    Mirrors the master's own vector DB and embedding settings so the new
-    container talks to the same qdrant and embedding backend over belleq-net.
+    Defaults to the host's shared qdrant with a per-context collection. If a
+    ``vector_db`` config is supplied (bring-your-own provider), it overrides the
+    backend/url/key/collection so a context can point at the customer's own
+    vector database instead of the shared one.
     """
+    collection = qdrant_collection or settings.qdrant_collection
     env = {
         "USER_ID": user_id or container_name,
         "DISPLAY_NAME": container_name,
@@ -59,7 +69,7 @@ def _container_env(*, container_name: str, api_key: str, user_id: str) -> dict[s
         "VECTORDB_BACKEND": settings.vectordb_backend,
         "QDRANT_URL": settings.qdrant_url,
         "QDRANT_API_KEY": settings.qdrant_api_key or "",
-        "QDRANT_COLLECTION": settings.qdrant_collection,
+        "QDRANT_COLLECTION": collection,
         "EMBEDDING_BACKEND": settings.embedding_backend,
         "OLLAMA_BASE_URL": settings.ollama_base_url,
         "OLLAMA_EMBED_MODEL": settings.ollama_embed_model,
@@ -76,6 +86,24 @@ def _container_env(*, container_name: str, api_key: str, user_id: str) -> dict[s
         env["PINECONE_INDEX_NAME"] = settings.pinecone_index_name or ""
         env["PINECONE_ENVIRONMENT"] = settings.pinecone_environment or ""
         env["PINECONE_CLOUD"] = settings.pinecone_cloud or "aws"
+
+    # Bring-your-own vector DB override (per context).
+    if vector_db:
+        backend = (vector_db.get("backend") or "").strip().lower()
+        if backend:
+            env["VECTORDB_BACKEND"] = backend
+        if vector_db.get("collection"):
+            env["QDRANT_COLLECTION"] = vector_db["collection"]
+        if backend == "pinecone":
+            env["PINECONE_API_KEY"] = vector_db.get("api_key", "")
+            env["PINECONE_INDEX_NAME"] = vector_db.get("index", "")
+            env["PINECONE_ENVIRONMENT"] = vector_db.get("environment", "")
+            env["PINECONE_CLOUD"] = vector_db.get("cloud", "aws")
+        else:  # qdrant-compatible (cloud or self-hosted)
+            if vector_db.get("url"):
+                env["QDRANT_URL"] = vector_db["url"]
+            if vector_db.get("api_key"):
+                env["QDRANT_API_KEY"] = vector_db["api_key"]
     return env
 
 
@@ -112,8 +140,18 @@ def _ensure_image(client) -> None:
         ) from e
 
 
-def _run_container(container_name: str, env: dict[str, str], user_id: str) -> str:
-    """Blocking docker run. Returns the new container's docker id."""
+def _run_container(
+    container_name: str,
+    env: dict[str, str],
+    labels: dict[str, str],
+    caps: dict | None = None,
+) -> str:
+    """Blocking docker run with resource caps + labels. Returns the docker id.
+
+    Caps: ram_mb -> --memory; cpu_vcpu -> --cpus (nano_cpus). A disk hard-cap is
+    intentionally not applied here (it needs xfs pquota on the host); KB storage
+    is metered at the app level instead.
+    """
     from docker.errors import APIError, ImageNotFound
 
     client = _docker_client()
@@ -127,17 +165,24 @@ def _run_container(container_name: str, env: dict[str, str], user_id: str) -> st
     except Exception:  # noqa: BLE001 - not found is the common, fine case
         pass
 
+    run_kwargs: dict = dict(
+        image=settings.user_container_image,
+        name=container_name,
+        detach=True,
+        network=settings.belleq_network,
+        environment=env,
+        volumes={f"{container_name}-data": {"bind": "/app/data", "mode": "rw"}},
+        restart_policy={"Name": "on-failure"},
+        labels=labels,
+    )
+    if caps:
+        if caps.get("ram_mb"):
+            run_kwargs["mem_limit"] = f"{int(caps['ram_mb'])}m"
+        if caps.get("cpu_vcpu"):
+            run_kwargs["nano_cpus"] = int(float(caps["cpu_vcpu"]) * 1_000_000_000)
+
     try:
-        container = client.containers.run(
-            image=settings.user_container_image,
-            name=container_name,
-            detach=True,
-            network=settings.belleq_network,
-            environment=env,
-            volumes={f"{container_name}-data": {"bind": "/app/data", "mode": "rw"}},
-            restart_policy={"Name": "on-failure"},
-            labels={"belleq.role": "user-container", "belleq.user_id": user_id or ""},
-        )
+        container = client.containers.run(**run_kwargs)
     except ImageNotFound as e:
         raise ProvisionError(
             f"Image '{settings.user_container_image}' not found on the host. "
@@ -168,15 +213,31 @@ async def _wait_healthy(base_url: str, timeout: float) -> bool:
 
 
 async def provision_user_container(
-    *, container_name: str, api_key: str, user_id: str
+    *,
+    container_name: str,
+    api_key: str,
+    user_id: str,
+    qdrant_collection: str | None = None,
+    vector_db: dict | None = None,
+    caps: dict | None = None,
+    labels: dict | None = None,
 ) -> dict:
     """Launch a user container on belleq-net and wait for it to be healthy.
 
     Returns dict with docker_id, base_url, port, healthy. Raises ProvisionError
     on docker-level failures.
     """
-    env = _container_env(container_name=container_name, api_key=api_key, user_id=user_id)
-    docker_id = await asyncio.to_thread(_run_container, container_name, env, user_id)
+    env = _container_env(
+        container_name=container_name,
+        api_key=api_key,
+        user_id=user_id,
+        qdrant_collection=qdrant_collection,
+        vector_db=vector_db,
+    )
+    # Default labels guarantee role + managed-by even if the caller passes none.
+    run_labels = {"belleq.role": "context", "belleq.managed-by": "belleq-platform"}
+    run_labels.update(labels or {})
+    docker_id = await asyncio.to_thread(_run_container, container_name, env, run_labels, caps)
     base_url = f"http://{container_name}:{settings.user_container_port}"
     healthy = await _wait_healthy(base_url, settings.user_container_health_timeout)
     if not healthy:
