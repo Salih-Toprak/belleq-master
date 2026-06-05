@@ -171,9 +171,19 @@ class ContainerMCPDispatcher:
     def _connectors_for(self, container_id: str) -> list:
         """Connectors to expose for an endpoint.
 
-        The reserved workspace id exposes every enabled connector in the env
-        ("connect everything"); any other id is a single container's whitelist.
+        - ``w_<workspace_id>``: every enabled connector owned by that workspace
+          ("connect everything", workspace-scoped — safe on shared masters).
+        - ``__workspace__`` (legacy): every enabled connector on the master
+          (only safe on single-tenant/dedicated masters).
+        - any other id: a single container's whitelist.
         """
+        if container_id.startswith("w_"):
+            ws = container_id[2:]
+            return [
+                c
+                for c in self._registry.list_all(enabled_only=True)
+                if (c.metadata or {}).get("workspace_id") == ws
+            ]
         if container_id == WORKSPACE_ID:
             return self._registry.list_all(enabled_only=True)
         return self._registry.enabled_connectors_for_container(container_id)
