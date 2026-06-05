@@ -34,8 +34,8 @@ _VALID_TYPES = frozenset({"chatbot", "user", "agent"})
 class ProvisionBody(BaseModel):
     """All fields optional — the master fills in sensible defaults.
 
-    The platform backend sends container_name/api_key/user_id; a one-click
-    dashboard call can send just display_name.
+    The platform backend sends the full set (workspace_id, caps, labels,
+    qdrant_collection, …); a one-click dashboard call can send just display_name.
     """
 
     container_name: str | None = None
@@ -43,6 +43,13 @@ class ProvisionBody(BaseModel):
     api_key: str | None = None
     user_id: str | None = None
     container_type: str = Field(default="user")
+    # EC2-packing additions (sent by the platform backend):
+    workspace_id: str | None = None
+    plan: str | None = None
+    caps: dict | None = None  # {ram_mb, cpu_vcpu, disk_gb}
+    labels: dict | None = None  # belleq.* labels computed by the backend
+    qdrant_collection: str | None = None
+    vector_db: dict | None = None  # bring-your-own provider config
 
 
 @router.post("/provision", summary="Provision a new user container", status_code=201)
@@ -64,7 +71,13 @@ async def provision_container(
 
     try:
         result = await provision_user_container(
-            container_name=container_name, api_key=api_key, user_id=user_id
+            container_name=container_name,
+            api_key=api_key,
+            user_id=user_id,
+            qdrant_collection=body.qdrant_collection,
+            vector_db=body.vector_db,
+            caps=body.caps,
+            labels=body.labels,
         )
     except ProvisionError as e:
         logger.error("provision_failed name=%s error=%s", container_name, e)
@@ -72,6 +85,14 @@ async def provision_container(
 
     registry: ContainerRegistry = get_registry(request)
     now = datetime.now(timezone.utc)
+    metadata = {
+        "docker_id": result["docker_id"],
+        "user_id": user_id,
+        "workspace_id": body.workspace_id or "",
+        "plan": body.plan or "",
+        "qdrant_collection": body.qdrant_collection or "",
+        "caps": body.caps or {},
+    }
     rec = ContainerRecord(
         container_id=container_name,
         display_name=display_name,
@@ -81,12 +102,11 @@ async def provision_container(
         enabled=True,
         added_at=now,
         updated_at=now,
-        metadata={"docker_id": result["docker_id"], "user_id": user_id},
+        metadata=metadata,
     )
     try:
         registry.add(rec)
     except ValueError:
-        # Re-provisioned an existing name: refresh its record instead.
         registry.update(
             container_name,
             {
@@ -94,18 +114,23 @@ async def provision_container(
                 "base_url": result["base_url"],
                 "api_key": api_key,
                 "enabled": True,
-                "metadata": {"docker_id": result["docker_id"], "user_id": user_id},
+                "metadata": metadata,
             },
         )
 
     logger.info(
-        "container_provisioned name=%s healthy=%s", container_name, result["healthy"]
+        "container_provisioned name=%s workspace=%s healthy=%s",
+        container_name,
+        body.workspace_id,
+        result["healthy"],
     )
     return {
         "container_id": container_name,
         "container_name": container_name,
         "display_name": display_name,
         "container_type": body.container_type,
+        "workspace_id": body.workspace_id,
+        "qdrant_collection": body.qdrant_collection,
         "base_url": result["base_url"],
         "port": result["port"],
         "api_key": api_key,
