@@ -80,6 +80,14 @@ def _container_env(
         "APP_HOST": "0.0.0.0",
         "APP_PORT": str(settings.user_container_port),
         "LOG_LEVEL": "INFO",
+        # Conversation fact-extraction — inherited from the master so credentials
+        # are set in one place and every context picks them up automatically.
+        "CONVERSATION_EXTRACTION_ENABLED": "true" if settings.conversation_extraction_enabled else "false",
+        "EXTRACTION_BACKEND": settings.extraction_backend,
+        "GEMINI_API_KEY": settings.gemini_api_key or "",
+        "GEMINI_MODEL": settings.gemini_model,
+        "ANTHROPIC_API_KEY": settings.extraction_anthropic_api_key or "",
+        "EXTRACTION_MODEL": settings.extraction_model,
     }
     if settings.vectordb_backend.strip().lower() == "pinecone":
         env["PINECONE_API_KEY"] = settings.pinecone_api_key or ""
