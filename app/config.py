@@ -88,6 +88,14 @@ class Settings(BaseSettings):
         default=8000,
         description="Port the user container listens on inside the network.",
     )
+    kb_autowire_enabled: bool = Field(
+        default=True,
+        description=(
+            "Auto-mount each context's own belleq-user MCP (the knowledge base + "
+            "conversation capture tools) into its aggregated /mcp/{container} endpoint, "
+            "so the public per-context bridge exposes them alongside the user's connectors."
+        ),
+    )
     user_container_health_timeout: float = Field(
         default=15.0,
         description=(
