@@ -65,6 +65,28 @@ class Settings(BaseSettings):
     ingestion_interval_minutes: int = Field(default=60)
     ingestion_collection: str = Field(default="company_knowledge")
 
+    # Conversation fact-extraction (propagated to every provisioned user container).
+    # Set these once on the master; user containers inherit them automatically.
+    conversation_extraction_enabled: bool = Field(
+        default=False,
+        description="Enable LLM fact-extraction from conversations in user containers.",
+    )
+    extraction_backend: str = Field(
+        default="gemini",
+        description='Extraction LLM provider for user containers: "gemini" or "anthropic".',
+    )
+    gemini_api_key: str = Field(
+        default="",
+        description="Gemini (google-genai) API key. NOTE: the free AI-Studio tier may "
+        "train on submitted data — link billing before routing customer data.",
+    )
+    gemini_model: str = Field(default="gemini-2.5-flash")
+    extraction_anthropic_api_key: str = Field(
+        default="",
+        description="Anthropic API key for Claude-Haiku extraction (if extraction_backend=anthropic).",
+    )
+    extraction_model: str = Field(default="claude-haiku-4-5")
+
     # Security (optional Fernet key for credentials at rest)
     credential_encryption_key: str = Field(default="")
 
