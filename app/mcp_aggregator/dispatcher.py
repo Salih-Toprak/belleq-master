@@ -166,14 +166,50 @@ class ContainerMCPDispatcher:
                     conn.connector_id,
                     exc_info=True,
                 )
+
+        # Auto-wire the context's own knowledge base (4E): mount the belleq-user
+        # container's MCP so its query_knowledge_base + record_exchange tools are
+        # exposed alongside the user's connectors. Only for real per-context ids —
+        # workspace endpoints aggregate many containers and have no single KB.
+        self._mount_kb(parent, container_id)
         return parent
+
+    def _mount_kb(self, parent, container_id: str) -> None:
+        """Best-effort mount of a context's own belleq-user MCP endpoint."""
+        from app.config import settings
+
+        if not settings.kb_autowire_enabled:
+            return
+        if container_id.startswith("w_") or container_id == WORKSPACE_ID:
+            return
+        try:
+            from fastmcp import Client
+            from fastmcp.client.transports import SSETransport
+            from fastmcp.server import create_proxy
+
+            kb_url = f"http://{container_id}:{settings.user_container_port}/mcp/sse"
+            kb_client = Client(SSETransport(url=kb_url))
+            parent.mount(create_proxy(kb_client), namespace="belleq_kb")
+            logger.info("kb_autowired container=%s url=%s", container_id, kb_url)
+        except Exception:  # noqa: BLE001
+            logger.warning("kb_autowire_failed container=%s", container_id, exc_info=True)
 
     def _connectors_for(self, container_id: str) -> list:
         """Connectors to expose for an endpoint.
 
-        The reserved workspace id exposes every enabled connector in the env
-        ("connect everything"); any other id is a single container's whitelist.
+        - ``w_<workspace_id>``: every enabled connector owned by that workspace
+          ("connect everything", workspace-scoped — safe on shared masters).
+        - ``__workspace__`` (legacy): every enabled connector on the master
+          (only safe on single-tenant/dedicated masters).
+        - any other id: a single container's whitelist.
         """
+        if container_id.startswith("w_"):
+            ws = container_id[2:]
+            return [
+                c
+                for c in self._registry.list_all(enabled_only=True)
+                if (c.metadata or {}).get("workspace_id") == ws
+            ]
         if container_id == WORKSPACE_ID:
             return self._registry.list_all(enabled_only=True)
         return self._registry.enabled_connectors_for_container(container_id)

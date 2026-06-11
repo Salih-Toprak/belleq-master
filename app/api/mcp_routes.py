@@ -31,6 +31,29 @@ def _get_connector_registry(request: Request) -> MCPConnectorRegistry:
     return request.app.state.mcp_connector_registry
 
 
+def _ws(request: Request) -> str:
+    """Workspace id injected by the platform's workspace proxy (X-Workspace-Id).
+
+    Empty on direct admin calls (no header) — those stay unscoped for back-compat.
+    """
+    return request.headers.get("X-Workspace-Id", "")
+
+
+def _visible(rec: MCPConnectorRecord, ws: str) -> bool:
+    if not ws:
+        return True
+    owner = (rec.metadata or {}).get("workspace_id", "")
+    # Legacy connectors (no owner) remain visible; otherwise must match.
+    return owner in ("", ws)
+
+
+def _owned_or_404(reg: MCPConnectorRegistry, connector_id: str, request: Request) -> MCPConnectorRecord:
+    rec = reg.get(connector_id)
+    if rec is None or not _visible(rec, _ws(request)):
+        raise HTTPException(status_code=404, detail="Connector not found")
+    return rec
+
+
 def _redact(secrets: dict[str, Any]) -> dict[str, Any]:
     return {k: ("***set***" if v else "") for k, v in (secrets or {}).items()}
 
@@ -108,7 +131,8 @@ async def list_connectors(
     _: None = Depends(require_admin),
 ) -> dict:
     reg = _get_connector_registry(request)
-    rows = reg.list_all(enabled_only=enabled_only)
+    ws = _ws(request)
+    rows = [r for r in reg.list_all(enabled_only=enabled_only) if _visible(r, ws)]
     return {"count": len(rows), "connectors": [_connector_to_public(r) for r in rows]}
 
 
@@ -119,10 +143,7 @@ async def get_connector(
     _: None = Depends(require_admin),
 ) -> dict:
     reg = _get_connector_registry(request)
-    rec = reg.get(connector_id)
-    if rec is None:
-        raise HTTPException(status_code=404, detail="Connector not found")
-    return _connector_to_public(rec)
+    return _connector_to_public(_owned_or_404(reg, connector_id, request))
 
 
 @router.post("/connectors", summary="Register a new MCP connector", status_code=201)
@@ -147,6 +168,9 @@ async def create_connector(
         updated_at=now,
         metadata=dict(body.metadata or {}),
     )
+    ws = _ws(request)
+    if ws:
+        rec.metadata["workspace_id"] = ws
     reg = _get_connector_registry(request)
     try:
         reg.add(rec)
@@ -166,9 +190,7 @@ async def patch_connector(
     _: None = Depends(require_admin),
 ) -> dict:
     reg = _get_connector_registry(request)
-    current = reg.get(connector_id)
-    if current is None:
-        raise HTTPException(status_code=404, detail="Connector not found")
+    current = _owned_or_404(reg, connector_id, request)
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         return _connector_to_public(current)
@@ -195,6 +217,7 @@ async def delete_connector(
     _: None = Depends(require_admin),
 ) -> dict:
     reg = _get_connector_registry(request)
+    _owned_or_404(reg, connector_id, request)
     try:
         reg.remove(connector_id)
     except KeyError:
@@ -209,6 +232,7 @@ async def enable_connector(
     _: None = Depends(require_admin),
 ) -> dict:
     reg = _get_connector_registry(request)
+    _owned_or_404(reg, connector_id, request)
     try:
         rec = reg.enable(connector_id)
     except KeyError:
@@ -223,6 +247,7 @@ async def disable_connector(
     _: None = Depends(require_admin),
 ) -> dict:
     reg = _get_connector_registry(request)
+    _owned_or_404(reg, connector_id, request)
     try:
         rec = reg.disable(connector_id)
     except KeyError:
@@ -238,9 +263,7 @@ async def test_connector(
 ) -> dict:
     """Connect to the upstream MCP server, list its tools, and record the result."""
     reg = _get_connector_registry(request)
-    rec = reg.get(connector_id)
-    if rec is None:
-        raise HTTPException(status_code=404, detail="Connector not found")
+    rec = _owned_or_404(reg, connector_id, request)
     result = await test_connection(rec, registry=reg)
     reg.record_test_result(
         connector_id,
@@ -280,9 +303,7 @@ async def authorize_connector(
     connector is marked connected immediately.
     """
     reg = _get_connector_registry(request)
-    rec = reg.get(connector_id)
-    if rec is None:
-        raise HTTPException(status_code=404, detail="Connector not found")
+    rec = _owned_or_404(reg, connector_id, request)
 
     try:
         meta = await oauth.discover(rec.url)
@@ -384,14 +405,20 @@ async def oauth_exchange(
 
 
 def _ensure_container(request: Request, container_id: str) -> None:
-    """Best-effort: warn but do not block if the container is unknown.
+    """Validate a container for whitelist ops, scoped to the workspace.
 
-    The aggregator keys off the registry container_id; we allow setting an
-    ACL before a container is registered so the dashboard can pre-configure.
+    Raises 404 if the container belongs to a *different* workspace (so one
+    workspace can't manage another's whitelist on a shared master). Unknown
+    containers are allowed (dashboard may pre-configure an ACL).
     """
     creg: ContainerRegistry = get_registry(request)
-    if creg.get(container_id) is None:
+    rec = creg.get(container_id)
+    if rec is None:
         logger.info("mcp_acl_for_unregistered_container container_id=%s", container_id)
+        return
+    ws = _ws(request)
+    if ws and (rec.metadata or {}).get("workspace_id", "") not in ("", ws):
+        raise HTTPException(status_code=404, detail="Container not found")
 
 
 @router.get(
@@ -403,6 +430,7 @@ async def list_container_connectors(
     request: Request,
     _: None = Depends(require_admin),
 ) -> dict:
+    _ensure_container(request, container_id)
     reg = _get_connector_registry(request)
     ids = reg.connectors_for_container(container_id)
     resolved = reg.enabled_connectors_for_container(container_id)
