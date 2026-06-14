@@ -328,6 +328,11 @@ class MasterDB:
         if self.get_container(container_id) is None:
             raise KeyError(container_id)
         with self._engine.begin() as conn:
+            # Drop only the connector↔container relationships — the connectors
+            # themselves are workspace-level and survive a context deletion.
+            conn.execute(
+                delete(container_mcp_acl).where(container_mcp_acl.c.container_id == container_id)
+            )
             conn.execute(
                 delete(container_registry).where(container_registry.c.container_id == container_id)
             )
