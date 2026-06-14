@@ -50,6 +50,7 @@ def _container_env(
     user_id: str,
     qdrant_collection: str | None = None,
     vector_db: dict | None = None,
+    extraction: dict | None = None,
 ) -> dict[str, str]:
     """Environment passed to the spawned user container.
 
@@ -80,15 +81,20 @@ def _container_env(
         "APP_HOST": "0.0.0.0",
         "APP_PORT": str(settings.user_container_port),
         "LOG_LEVEL": "INFO",
-        # Conversation fact-extraction — inherited from the master so credentials
-        # are set in one place and every context picks them up automatically.
-        "CONVERSATION_EXTRACTION_ENABLED": "true" if settings.conversation_extraction_enabled else "false",
-        "EXTRACTION_BACKEND": settings.extraction_backend,
-        "GEMINI_API_KEY": settings.gemini_api_key or "",
-        "GEMINI_MODEL": settings.gemini_model,
-        "ANTHROPIC_API_KEY": settings.extraction_anthropic_api_key or "",
-        "EXTRACTION_MODEL": settings.extraction_model,
     }
+
+    # Conversation fact-extraction — the (static) backend pushes these down in
+    # the provision request so the ephemeral master never stores the keys. The
+    # master's own env (settings.*) is only a fallback for standalone use.
+    ex = extraction or {}
+    env["CONVERSATION_EXTRACTION_ENABLED"] = (
+        "true" if ex.get("enabled", settings.conversation_extraction_enabled) else "false"
+    )
+    env["EXTRACTION_BACKEND"] = ex.get("backend") or settings.extraction_backend
+    env["GEMINI_API_KEY"] = ex.get("gemini_api_key", settings.gemini_api_key) or ""
+    env["GEMINI_MODEL"] = ex.get("gemini_model") or settings.gemini_model
+    env["ANTHROPIC_API_KEY"] = ex.get("anthropic_api_key", settings.extraction_anthropic_api_key) or ""
+    env["EXTRACTION_MODEL"] = ex.get("extraction_model") or settings.extraction_model
     if settings.vectordb_backend.strip().lower() == "pinecone":
         env["PINECONE_API_KEY"] = settings.pinecone_api_key or ""
         env["PINECONE_INDEX_NAME"] = settings.pinecone_index_name or ""
@@ -229,6 +235,7 @@ async def provision_user_container(
     vector_db: dict | None = None,
     caps: dict | None = None,
     labels: dict | None = None,
+    extraction: dict | None = None,
 ) -> dict:
     """Launch a user container on belleq-net and wait for it to be healthy.
 
@@ -241,6 +248,7 @@ async def provision_user_container(
         user_id=user_id,
         qdrant_collection=qdrant_collection,
         vector_db=vector_db,
+        extraction=extraction,
     )
     # Default labels guarantee role + managed-by even if the caller passes none.
     run_labels = {"belleq.role": "context", "belleq.managed-by": "belleq-platform"}

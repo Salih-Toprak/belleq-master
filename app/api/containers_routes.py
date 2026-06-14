@@ -50,6 +50,9 @@ class ProvisionBody(BaseModel):
     labels: dict | None = None  # belleq.* labels computed by the backend
     qdrant_collection: str | None = None
     vector_db: dict | None = None  # bring-your-own provider config
+    # Conversation fact-extraction config, pushed down by the (static) backend
+    # so the ephemeral master never stores the keys.
+    extraction: dict | None = None
 
 
 @router.post("/provision", summary="Provision a new user container", status_code=201)
@@ -78,6 +81,7 @@ async def provision_container(
             vector_db=body.vector_db,
             caps=body.caps,
             labels=body.labels,
+            extraction=body.extraction,
         )
     except ProvisionError as e:
         logger.error("provision_failed name=%s error=%s", container_name, e)
