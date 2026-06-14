@@ -155,6 +155,14 @@ container_mcp_acl = Table(
 )
 
 
+def _as_naive_utc(dt: datetime) -> datetime:
+    """Normalize a datetime to naive UTC so SQLite-read (naive) and parsed
+    (possibly tz-aware) timestamps compare cleanly."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def _ensure_sqlite_parent_dir(url: str) -> None:
     """Create parent directory for SQLite file if needed."""
     try:
@@ -782,6 +790,53 @@ class MasterDB:
         with self._engine.begin() as conn:
             conn.execute(insert(mcp_connectors).values(**data))
         logger.info("mcp_connector_added connector_id=%s", record.connector_id)
+
+    def get_connector_secrets_raw(self, connector_id: str) -> str:
+        """Return the stored secrets blob verbatim (ciphertext), without decrypting.
+
+        Used when mirroring a connector to the backend: the encrypted blob is
+        forwarded as-is so plaintext secrets never leave this process.
+        """
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(mcp_connectors.c.secrets_json).where(
+                    mcp_connectors.c.connector_id == connector_id
+                )
+            ).first()
+        return (row[0] if row else "") or "{}"
+
+    def import_connector(self, record: MCPConnectorRecord, secrets_raw: str) -> bool:
+        """Upsert a connector pushed from the backend, storing secrets verbatim.
+
+        ``secrets_raw`` is written to ``secrets_json`` unchanged (it is already
+        encrypted with the shared key, so no re-encryption is needed). Idempotent:
+        a row whose local ``updated_at`` is newer than ``record.updated_at`` is
+        left untouched. Returns True if written, False if skipped.
+        """
+        existing = self.get_connector(record.connector_id)
+        if (
+            existing is not None
+            and existing.updated_at is not None
+            and record.updated_at is not None
+            and _as_naive_utc(existing.updated_at) >= _as_naive_utc(record.updated_at)
+        ):
+            return False
+        data = self._connector_to_dict(record)
+        data["secrets_json"] = secrets_raw or "{}"  # store verbatim, no re-encrypt
+        with self._engine.begin() as conn:
+            if existing is None:
+                conn.execute(insert(mcp_connectors).values(**data))
+            else:
+                payload = {
+                    k: v for k, v in data.items() if k not in ("connector_id", "added_at")
+                }
+                conn.execute(
+                    update(mcp_connectors)
+                    .where(mcp_connectors.c.connector_id == record.connector_id)
+                    .values(**payload)
+                )
+        logger.info("mcp_connector_imported connector_id=%s", record.connector_id)
+        return True
 
     def update_connector(self, connector_id: str, updates: dict[str, Any]) -> MCPConnectorRecord:
         current = self.get_connector(connector_id)

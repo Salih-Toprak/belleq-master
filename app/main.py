@@ -119,6 +119,24 @@ async def lifespan(app: FastAPI):
     conns = mcp_connector_registry.list_all(enabled_only=False)
     logger.info("mcp_connector_registry_loaded connectors=%s", len(conns))
 
+    # Mirror connector changes to the backend so they survive this instance
+    # being terminated. Also backfill once on boot (idempotent) so connectors
+    # registered before mirroring — or stored under an older empty key — get
+    # persisted off-instance.
+    if settings.backend_sync_url:
+        from app.mcp_connectors.sync import BackendConnectorSink
+
+        sink = BackendConnectorSink(
+            base_url=settings.backend_sync_url,
+            internal_token=settings.backend_internal_token,
+        )
+        mcp_connector_registry.set_sink(sink)
+        app.state.connector_sink = sink
+        for rec in conns:
+            sink.on_upsert(rec, db.get_connector_secrets_raw(rec.connector_id))
+        logger.info("connector_mirror_enabled backend=%s backfill=%s",
+                    settings.backend_sync_url, len(conns))
+
     # Per-container aggregated MCP endpoint at /mcp/{container_id}.
     mcp_dispatcher = ContainerMCPDispatcher(mcp_connector_registry)
     app.mount("/mcp", mcp_dispatcher.as_asgi())
