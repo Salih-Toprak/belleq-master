@@ -90,6 +90,20 @@ class Settings(BaseSettings):
     # Security (optional Fernet key for credentials at rest)
     credential_encryption_key: str = Field(default="")
 
+    # Connector durability: mirror connector changes to the backend (the only
+    # static server) so they survive this instance being terminated. When
+    # backend_sync_url is empty the mirror is disabled (standalone/dev).
+    backend_sync_url: str = Field(
+        default="",
+        description="Base URL of belleq-backend, e.g. https://api.belleq.app. "
+        "Connector mutations are mirrored to {backend_sync_url}/internal/connectors.",
+    )
+    backend_internal_token: str = Field(
+        default="",
+        description="Shared secret sent as X-Internal-Token when mirroring "
+        "connectors to the backend. Must match the backend's BACKEND_INTERNAL_TOKEN.",
+    )
+
     # User container provisioning (Docker-out-of-Docker via mounted socket)
     user_container_image: str = Field(
         default="ghcr.io/salih-toprak/belleq-user:latest",

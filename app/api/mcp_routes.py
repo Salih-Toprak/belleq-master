@@ -182,6 +182,76 @@ async def create_connector(
     return _connector_to_public(created)
 
 
+class ConnectorImportItem(BaseModel):
+    connector_id: str
+    display_name: str = ""
+    transport: str = "streamable_http"
+    url: str = ""
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    auth_status: str = "none"
+    tool_count: int = 0
+    last_status: str = "unknown"
+    # The secrets blob exactly as stored on the source master (already encrypted
+    # with the shared key); written verbatim, never decrypted here.
+    secrets_encrypted: str = "{}"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    added_at: str | None = None
+    updated_at: str | None = None
+
+
+class ConnectorImportBody(BaseModel):
+    connectors: list[ConnectorImportItem] = Field(default_factory=list)
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+@router.post("/connectors/import", summary="Bulk-hydrate connectors from the backend")
+async def import_connectors(
+    body: ConnectorImportBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict:
+    """Restore a workspace's connectors onto this (possibly fresh) master.
+
+    Called by the backend after provisioning. Secrets are stored verbatim;
+    rows whose local copy is newer are left untouched.
+    """
+    reg = _get_connector_registry(request)
+    written = 0
+    skipped = 0
+    for item in body.connectors:
+        rec = MCPConnectorRecord(
+            connector_id=item.connector_id.strip(),
+            display_name=item.display_name,
+            transport=(item.transport or "streamable_http").strip().lower(),
+            url=item.url or "",
+            command=item.command or "",
+            args=list(item.args or []),
+            enabled=bool(item.enabled),
+            auth_status=item.auth_status or "none",
+            tool_count=int(item.tool_count or 0),
+            last_status=item.last_status or "unknown",
+            added_at=_parse_dt(item.added_at),
+            updated_at=_parse_dt(item.updated_at),
+            metadata=dict(item.metadata or {}),
+        )
+        if reg.import_record(rec, item.secrets_encrypted or "{}"):
+            written += 1
+        else:
+            skipped += 1
+    logger.info("mcp_connectors_imported written=%s skipped=%s", written, skipped)
+    return {"written": written, "skipped": skipped}
+
+
 @router.patch("/connectors/{connector_id}", summary="Update an MCP connector")
 async def patch_connector(
     connector_id: str,
