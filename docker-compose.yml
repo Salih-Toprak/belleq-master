@@ -8,6 +8,32 @@ services:
       - belleq-net
     restart: always
 
+  # Shared embedding service — one Ollama per master, reused by every user
+  # container on belleq-net (same model as Qdrant: a host-wide sidecar, not
+  # per-context). Containers reach it at http://ollama:11434.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - belleq-net
+    restart: always
+
+  # One-shot: pull the embedding model into Ollama's volume on boot so user
+  # containers can embed immediately. Idempotent (a no-op if already present);
+  # the model name tracks OLLAMA_EMBED_MODEL from .env.
+  ollama-model-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    networks:
+      - belleq-net
+    entrypoint: ["/bin/sh", "-c", "sleep 5 && ollama pull ${OLLAMA_EMBED_MODEL:-nomic-embed-text}"]
+    restart: "no"
+
   master:
     # Published by CI to GHCR. `docker compose pull` fetches this image;
     # `docker compose up --build` (local dev) rebuilds and tags it.
@@ -24,6 +50,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - qdrant
+      - ollama
     networks:
       - belleq-net
     restart: on-failure
@@ -34,3 +61,4 @@ networks:
 
 volumes:
   qdrant_data:
+  ollama_models:

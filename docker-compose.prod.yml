@@ -13,6 +13,14 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  ollama:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   master:
     ports: []
     restart: always
