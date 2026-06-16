@@ -36,6 +36,17 @@ class ContainerClient:
             return {"X-Container-Key": record.api_key}
         return {}
 
+    def _internal_headers(self) -> dict[str, str]:
+        """Auth for the container's ``/internal/*`` endpoints.
+
+        Those require ``X-Master-Key`` == the container's ``MASTER_API_KEY`` env,
+        which the provisioner sets to this master's ``admin_api_key``.
+        """
+        from app.config import settings
+
+        key = (settings.admin_api_key or "").strip()
+        return {"X-Master-Key": key} if key else {}
+
     async def health_check(self, record: ContainerRecord) -> tuple[bool, int | None, str]:
         """
         Returns (reachable, response_ms, error_message).
@@ -128,6 +139,30 @@ class ContainerClient:
             r = await self._client.delete(
                 f"{record.base_url.rstrip('/')}/docs/{doc_id}",
                 headers=self._headers(record),
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:  # noqa: BLE001
+            return _unreachable(record, str(e))
+
+    async def get_conversation_stats(self, record: ContainerRecord) -> dict:
+        """GET {base_url}/internal/conversations/stats (conversation capture)."""
+        try:
+            r = await self._client.get(
+                f"{record.base_url.rstrip('/')}/internal/conversations/stats",
+                headers=self._internal_headers(),
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:  # noqa: BLE001
+            return _unreachable(record, str(e))
+
+    async def flush_conversations(self, record: ContainerRecord) -> dict:
+        """POST {base_url}/internal/conversations/flush — force-ingest now."""
+        try:
+            r = await self._client.post(
+                f"{record.base_url.rstrip('/')}/internal/conversations/flush",
+                headers=self._internal_headers(),
             )
             r.raise_for_status()
             return r.json()

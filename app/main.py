@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from app.api import (
     aggregate_routes,
     containers_routes,
+    conversations_routes,
     embeddings_routes,
     ingestion_routes,
     mcp_routes,
@@ -209,6 +210,7 @@ app.include_router(sources_routes.router)
 app.include_router(ingestion_routes.router)
 app.include_router(mcp_routes.router)
 app.include_router(containers_routes.router)
+app.include_router(conversations_routes.router)
 
 
 @app.get("/health", tags=["Health"])
