@@ -53,6 +53,9 @@ class ProvisionBody(BaseModel):
     # Conversation fact-extraction config, pushed down by the (static) backend
     # so the ephemeral master never stores the keys.
     extraction: dict | None = None
+    # Rebuild: re-pull the newest published image before (re)creating the
+    # container. The named -data volume is preserved, so the KB survives.
+    force_pull: bool = False
 
 
 @router.post("/provision", summary="Provision a new user container", status_code=201)
@@ -82,6 +85,7 @@ async def provision_container(
             caps=body.caps,
             labels=body.labels,
             extraction=body.extraction,
+            force_pull=body.force_pull,
         )
     except ProvisionError as e:
         logger.error("provision_failed name=%s error=%s", container_name, e)
