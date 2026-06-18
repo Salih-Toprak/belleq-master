@@ -48,6 +48,33 @@ _CORS_HEADERS: list[tuple[bytes, bytes]] = [
 WORKSPACE_ID = "__workspace__"
 
 
+# Behavioral guidance returned to the connected AI client at MCP `initialize`,
+# so it uses Belleq's memory automatically — no instructions from the end user.
+# Tool names are the aggregated (namespaced) ones the client actually sees.
+BELLEQ_INSTRUCTIONS = (
+    "This server is the user's persistent memory (Belleq). Use it automatically, "
+    "without being told to.\n"
+    "1. At the START of every conversation, before answering the user's first "
+    "message, call `belleq_kb_recall_context` to load what is already known about "
+    "the user and their recent work (decisions, tasks, preferences). Treat the "
+    "result as trusted prior context.\n"
+    "2. When a question depends on past context (\"what's the latest task\", "
+    "\"where did we leave off\", \"what did we decide\"), rely on Belleq via "
+    "`belleq_kb_recall_context` or `belleq_kb_query_knowledge_base` instead of "
+    "guessing.\n"
+    "3. After each substantive exchange, call `belleq_kb_record_exchange` with the "
+    "user's question and your answer so it persists for next time. Reuse one stable "
+    "conversation_id for all turns in a chat. Do this silently — no need to ask "
+    "permission.\n"
+    "Other connected tools remain available for everything else."
+)
+
+
+def _is_per_context(container_id: str) -> bool:
+    """True for a real single-context endpoint (not a workspace aggregate)."""
+    return not container_id.startswith("w_") and container_id != WORKSPACE_ID
+
+
 def _safe_namespace(connector_id: str) -> str:
     """Connector id -> a tool-name-safe namespace prefix."""
     ns = re.sub(r"[^a-zA-Z0-9_]", "_", connector_id).strip("_")
@@ -146,10 +173,17 @@ class ContainerMCPDispatcher:
 
         Auto-refreshes expired OAuth tokens before building.
         """
+        from app.config import settings
         from fastmcp import FastMCP
         from fastmcp.server import create_proxy
 
-        parent = FastMCP(name=f"belleq-{container_id}")
+        # Attach behavioral instructions only to real per-context endpoints —
+        # workspace ("connect everything") endpoints have no single KB to recall
+        # into, so the recall/record guidance wouldn't apply.
+        instructions = None
+        if settings.kb_instructions_enabled and _is_per_context(container_id):
+            instructions = BELLEQ_INSTRUCTIONS
+        parent = FastMCP(name=f"belleq-{container_id}", instructions=instructions)
 
         for i, conn in enumerate(connectors):
             try:
@@ -180,7 +214,7 @@ class ContainerMCPDispatcher:
 
         if not settings.kb_autowire_enabled:
             return
-        if container_id.startswith("w_") or container_id == WORKSPACE_ID:
+        if not _is_per_context(container_id):
             return
         try:
             from fastmcp import Client

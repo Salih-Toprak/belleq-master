@@ -132,6 +132,15 @@ class Settings(BaseSettings):
             "so the public per-context bridge exposes them alongside the user's connectors."
         ),
     )
+    kb_instructions_enabled: bool = Field(
+        default=True,
+        description=(
+            "Attach behavioral MCP server `instructions` to each per-context endpoint "
+            "so a connected AI client recalls Belleq context first and saves exchanges "
+            "automatically, with no user instructions. Returned to the client at MCP "
+            "initialize. Only applied to real per-context endpoints (not workspace ones)."
+        ),
+    )
     user_container_health_timeout: float = Field(
         default=15.0,
         description=(
