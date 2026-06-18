@@ -121,16 +121,18 @@ def _container_env(
     return env
 
 
-def _ensure_image(client) -> None:
+def _ensure_image(client, force: bool = False) -> None:
     """Pull the user image if it isn't already on the host.
 
     Auto-pull means the host never needs a manual clone/build — the image
-    is published to GHCR by belleq-user CI and fetched on first use.
+    is published to GHCR by belleq-user CI and fetched on first use. Pass
+    ``force=True`` (a context rebuild) to always re-pull so the container is
+    recreated from the newest published image.
     """
     from docker.errors import APIError, ImageNotFound
 
     image = settings.user_container_image
-    if not settings.user_container_always_pull:
+    if not force and not settings.user_container_always_pull:
         try:
             client.images.get(image)
             return
@@ -159,6 +161,7 @@ def _run_container(
     env: dict[str, str],
     labels: dict[str, str],
     caps: dict | None = None,
+    force_pull: bool = False,
 ) -> str:
     """Blocking docker run with resource caps + labels. Returns the docker id.
 
@@ -169,9 +172,11 @@ def _run_container(
     from docker.errors import APIError, ImageNotFound
 
     client = _docker_client()
-    _ensure_image(client)
+    _ensure_image(client, force=force_pull)
 
-    # Remove any stale container with the same name (e.g. failed prior attempt).
+    # Remove any stale container with the same name (e.g. failed prior attempt,
+    # or the previous image on a rebuild). The named -data volume is left intact
+    # so the context's knowledge base survives a rebuild.
     try:
         stale = client.containers.get(container_name)
         logger.info("removing_stale_container name=%s", container_name)
@@ -236,11 +241,12 @@ async def provision_user_container(
     caps: dict | None = None,
     labels: dict | None = None,
     extraction: dict | None = None,
+    force_pull: bool = False,
 ) -> dict:
     """Launch a user container on belleq-net and wait for it to be healthy.
 
     Returns dict with docker_id, base_url, port, healthy. Raises ProvisionError
-    on docker-level failures.
+    on docker-level failures. ``force_pull`` re-pulls the image first (rebuild).
     """
     env = _container_env(
         container_name=container_name,
@@ -253,7 +259,9 @@ async def provision_user_container(
     # Default labels guarantee role + managed-by even if the caller passes none.
     run_labels = {"belleq.role": "context", "belleq.managed-by": "belleq-platform"}
     run_labels.update(labels or {})
-    docker_id = await asyncio.to_thread(_run_container, container_name, env, run_labels, caps)
+    docker_id = await asyncio.to_thread(
+        _run_container, container_name, env, run_labels, caps, force_pull
+    )
     base_url = f"http://{container_name}:{settings.user_container_port}"
     healthy = await _wait_healthy(base_url, settings.user_container_health_timeout)
     if not healthy:

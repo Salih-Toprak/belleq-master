@@ -115,12 +115,16 @@ async def list_docs(
     try:
         total = await adapter.count(collection_name, flt)
         rows = await adapter.scroll(collection_name, filters=flt, limit=limit, offset=offset)
+        # ``scroll`` yields {id, payload}; the dashboard expects each document's
+        # payload fields at the top level (doc_title, source, indexed_at, …), so
+        # flatten the payload up and keep the point id alongside it.
+        documents = [{"id": r.get("id"), **(r.get("payload") or {})} for r in rows]
         return {
             "collection": collection_name,
             "total": total,
             "offset": offset,
             "limit": limit,
-            "documents": rows,
+            "documents": documents,
         }
     except VectorDBError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
