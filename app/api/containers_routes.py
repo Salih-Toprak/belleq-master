@@ -147,6 +147,30 @@ async def provision_container(
     }
 
 
+@router.post("/self/rebuild", summary="Rebuild the master container in place")
+async def rebuild_self(_: None = Depends(require_admin)) -> dict:
+    """Re-pull the newest master image and recreate this master container.
+
+    Hands the actual swap off to a short-lived rebuilder container, so this
+    endpoint returns before the master is torn down. The named data volumes
+    (Qdrant) are preserved.
+    """
+    import asyncio
+
+    from app.containers.provisioner import ProvisionError
+    from app.containers.self_rebuild import trigger_rebuild
+
+    try:
+        result = await asyncio.to_thread(trigger_rebuild)
+    except ProvisionError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        logger.exception("master_self_rebuild_failed")
+        raise HTTPException(status_code=500, detail=f"Master rebuild failed: {e}") from e
+    logger.info("master_self_rebuild_triggered image=%s", result.get("image"))
+    return result
+
+
 @router.delete("/{container_name}", summary="Stop and remove a user container")
 async def delete_container(
     container_name: str,
