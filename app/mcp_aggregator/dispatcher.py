@@ -204,6 +204,32 @@ class ContainerMCPDispatcher:
             instructions = BELLEQ_INSTRUCTIONS
         parent = FastMCP(name=f"belleq-{container_id}", instructions=instructions)
 
+        # 4C — MCP response capture: observe connector tool results on real
+        # per-context endpoints and ingest document-like ones into the context's
+        # KB. Best-effort middleware; never affects the tool call itself.
+        if settings.mcp_capture_enabled and _is_per_context(container_id):
+            try:
+                from app.mcp_aggregator.capture_middleware import CaptureMiddleware
+
+                capture_url = (
+                    f"http://{container_id}:{settings.user_container_port}/internal/kb/capture"
+                )
+                exclude = {
+                    n.strip() for n in (settings.mcp_capture_exclude or "").split(",") if n.strip()
+                }
+                parent.add_middleware(
+                    CaptureMiddleware(
+                        container_id=container_id,
+                        capture_url=capture_url,
+                        admin_key=(settings.admin_api_key or ""),
+                        min_chars=settings.mcp_capture_min_chars,
+                        exclude_namespaces=exclude,
+                    )
+                )
+                logger.info("mcp_capture_enabled container=%s", container_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("mcp_capture_setup_failed container=%s", container_id, exc_info=True)
+
         for i, conn in enumerate(connectors):
             try:
                 # Auto-refresh expired tokens.

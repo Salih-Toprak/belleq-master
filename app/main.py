@@ -213,6 +213,7 @@ app.include_router(mcp_routes.router)
 app.include_router(containers_routes.router)
 app.include_router(conversations_routes.router)
 app.include_router(kb_routes.router)
+app.include_router(kb_routes.ingestion_router)
 
 
 @app.get("/health", tags=["Health"])

@@ -141,6 +141,22 @@ class Settings(BaseSettings):
             "initialize. Only applied to real per-context endpoints (not workspace ones)."
         ),
     )
+    mcp_capture_enabled: bool = Field(
+        default=True,
+        description=(
+            "MCP response capture (4C): observe connector tool results flowing "
+            "through each per-context proxy and ingest document-like ones into that "
+            "context's knowledge base. Best-effort; never affects the tool call."
+        ),
+    )
+    mcp_capture_min_chars: int = Field(
+        default=800,
+        description="Minimum result text length to treat a tool response as document-like.",
+    )
+    mcp_capture_exclude: str = Field(
+        default="",
+        description="Comma-separated connector namespaces to never capture (per-source opt-out).",
+    )
     user_container_health_timeout: float = Field(
         default=15.0,
         description=(

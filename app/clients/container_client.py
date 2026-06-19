@@ -166,6 +166,18 @@ class ContainerClient:
         r.raise_for_status()
         return r.json()
 
+    async def get_ingestion_stats(self, record: ContainerRecord) -> dict:
+        """GET {base_url}/internal/ingestion/stats (ingestion queue counts)."""
+        try:
+            r = await self._client.get(
+                f"{record.base_url.rstrip('/')}/internal/ingestion/stats",
+                headers=self._internal_headers(),
+            )
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:  # noqa: BLE001
+            return _unreachable(record, str(e))
+
     async def get_conversation_stats(self, record: ContainerRecord) -> dict:
         """GET {base_url}/internal/conversations/stats (conversation capture)."""
         try:
