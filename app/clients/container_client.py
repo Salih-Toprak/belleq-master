@@ -145,6 +145,27 @@ class ContainerClient:
         except Exception as e:  # noqa: BLE001
             return _unreachable(record, str(e))
 
+    async def kb_op(
+        self,
+        record: ContainerRecord,
+        op: str,
+        payload: dict | None = None,
+    ) -> dict:
+        """Call a container KB REST endpoint (recall | query | record | flush).
+
+        These mirror the MCP tools so non-MCP AI providers can use Belleq over
+        plain HTTP. Auth is the stable ``X-Master-Key`` (``/internal/*``), so the
+        per-context api_key can rotate without recreating the container.
+        Raises on transport/HTTP error so the caller can surface a real status.
+        """
+        r = await self._client.post(
+            f"{record.base_url.rstrip('/')}/internal/kb/{op}",
+            headers=self._internal_headers(),
+            json=payload or {},
+        )
+        r.raise_for_status()
+        return r.json()
+
     async def get_conversation_stats(self, record: ContainerRecord) -> dict:
         """GET {base_url}/internal/conversations/stats (conversation capture)."""
         try:

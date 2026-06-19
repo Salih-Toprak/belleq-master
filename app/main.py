@@ -20,6 +20,7 @@ from app.api import (
     conversations_routes,
     embeddings_routes,
     ingestion_routes,
+    kb_routes,
     mcp_routes,
     registry_routes,
     sources_routes,
@@ -211,6 +212,7 @@ app.include_router(ingestion_routes.router)
 app.include_router(mcp_routes.router)
 app.include_router(containers_routes.router)
 app.include_router(conversations_routes.router)
+app.include_router(kb_routes.router)
 
 
 @app.get("/health", tags=["Health"])
