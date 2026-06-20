@@ -166,6 +166,28 @@ class ContainerClient:
         r.raise_for_status()
         return r.json()
 
+    async def run_agent(
+        self,
+        record: ContainerRecord,
+        payload: dict,
+        timeout: float = 600.0,
+    ) -> dict:
+        """Run an agent task in the container (POST /internal/agents/run).
+
+        The agentic loop can take a while (several tool/LLM calls), so this uses
+        a generous per-call timeout that overrides the client default. Auth is
+        the stable ``X-Master-Key`` like the other ``/internal/*`` calls. Raises
+        on transport/HTTP error so the backend can mark the task failed.
+        """
+        r = await self._client.post(
+            f"{record.base_url.rstrip('/')}/internal/agents/run",
+            headers=self._internal_headers(),
+            json=payload,
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        return r.json()
+
     async def get_ingestion_stats(self, record: ContainerRecord) -> dict:
         """GET {base_url}/internal/ingestion/stats (ingestion queue counts)."""
         try:

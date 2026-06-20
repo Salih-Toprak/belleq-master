@@ -89,7 +89,7 @@ async def ingestion_stats_all(
         "containers": containers_out,
     }
 
-_VALID_OPS = {"recall", "query", "record", "flush", "upload"}
+_VALID_OPS = {"recall", "query", "record", "flush", "upload", "agent_write"}
 
 
 @router.post("/{container_name}/{op}")
