@@ -105,12 +105,14 @@ class Settings(BaseSettings):
     )
     # This master's own network-reachable base URL, used to tell a user container
     # where to find its aggregated MCP endpoint ({self_base_url}/mcp/{container})
-    # when running an agent's connector tools. Empty = connector tools are
-    # unavailable to agents (KB read/write + LLM still work).
+    # when running an agent's connector tools. Defaults to the stable compose
+    # address on belleq-net (container_name `belleq-master`, port 9000) so agent
+    # connector tools work on any master with no env var — override via
+    # SELF_BASE_URL only for non-standard topologies.
     self_base_url: str = Field(
-        default="",
+        default="http://belleq-master:9000",
         description="This master's base URL reachable from user containers, "
-        "e.g. http://master:9000. Used for agent connector-tool access.",
+        "e.g. http://belleq-master:9000. Used for agent connector-tool access.",
     )
 
     # User container provisioning (Docker-out-of-Docker via mounted socket)
