@@ -103,6 +103,15 @@ class Settings(BaseSettings):
         description="Shared secret sent as X-Internal-Token when mirroring "
         "connectors to the backend. Must match the backend's BACKEND_INTERNAL_TOKEN.",
     )
+    # This master's own network-reachable base URL, used to tell a user container
+    # where to find its aggregated MCP endpoint ({self_base_url}/mcp/{container})
+    # when running an agent's connector tools. Empty = connector tools are
+    # unavailable to agents (KB read/write + LLM still work).
+    self_base_url: str = Field(
+        default="",
+        description="This master's base URL reachable from user containers, "
+        "e.g. http://master:9000. Used for agent connector-tool access.",
+    )
 
     # User container provisioning (Docker-out-of-Docker via mounted socket)
     user_container_image: str = Field(
