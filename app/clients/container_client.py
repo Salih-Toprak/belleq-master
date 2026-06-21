@@ -188,6 +188,23 @@ class ContainerClient:
         r.raise_for_status()
         return r.json()
 
+    async def notify_agent(
+        self,
+        record: ContainerRecord,
+        payload: dict,
+        timeout: float = 60.0,
+    ) -> dict:
+        """Send a run notification via a messaging connector (POST
+        /internal/agents/notify). Best-effort; raises on transport/HTTP error."""
+        r = await self._client.post(
+            f"{record.base_url.rstrip('/')}/internal/agents/notify",
+            headers=self._internal_headers(),
+            json=payload,
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        return r.json()
+
     async def get_ingestion_stats(self, record: ContainerRecord) -> dict:
         """GET {base_url}/internal/ingestion/stats (ingestion queue counts)."""
         try:
