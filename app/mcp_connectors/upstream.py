@@ -9,6 +9,7 @@ never have to choose one.
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 from app.mcp_connectors.models import MCPConnectorRecord
@@ -117,11 +118,15 @@ def build_client(record: MCPConnectorRecord, *, transport: str | None = None):
     if t == "stdio":
         if not record.command:
             raise ValueError("stdio connector requires a command")
+        # Inherit the master's environment (PATH, PYTHONPATH, …) and overlay only
+        # the connector's secrets, so commands like `python -m app...` resolve and
+        # bundled servers can import the app package. Without this the subprocess
+        # would get ONLY record.env and fail to even find the interpreter.
         return Client(
             StdioTransport(
                 command=record.command,
                 args=list(record.args or []),
-                env=dict(record.env or {}),
+                env={**os.environ, **(record.env or {})},
             )
         )
 
