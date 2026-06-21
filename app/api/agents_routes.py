@@ -53,3 +53,26 @@ async def run_agent(
     except Exception as exc:  # noqa: BLE001
         logger.warning("agent_run_passthrough_failed container=%s err=%s", container_name, exc)
         raise HTTPException(status_code=502, detail=f"Context unavailable: {exc}") from exc
+
+
+@router.post("/{container_name}/notify")
+async def notify_agent(
+    container_name: str,
+    payload: dict = Body(default_factory=dict),
+    registry: ContainerRegistry = Depends(get_registry),
+    client: ContainerClient = Depends(get_client),
+) -> dict:
+    """Send a run-completion notification through a messaging connector. Like
+    /run, injects the aggregated MCP URL so the container can reach the
+    connector's send-message tool."""
+    rec = registry.get(container_name)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="Context container not found")
+
+    base = (settings.self_base_url or "").rstrip("/")
+    payload = {**payload, "connectors_mcp_url": f"{base}/mcp/{container_name}" if base else ""}
+    try:
+        return await client.notify_agent(rec, payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("agent_notify_passthrough_failed container=%s err=%s", container_name, exc)
+        raise HTTPException(status_code=502, detail=f"Context unavailable: {exc}") from exc
