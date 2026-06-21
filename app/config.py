@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     )
     extraction_model: str = Field(default="claude-haiku-4-5")
 
+    # Agent web access (Tavily). Fallback for the key the backend pushes per
+    # provision; lets a standalone master grant agents web tools too.
+    tavily_api_key: str = Field(default="")
+
     # Security (optional Fernet key for credentials at rest)
     credential_encryption_key: str = Field(default="")
 

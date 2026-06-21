@@ -95,6 +95,8 @@ def _container_env(
     env["GEMINI_MODEL"] = ex.get("gemini_model") or settings.gemini_model
     env["ANTHROPIC_API_KEY"] = ex.get("anthropic_api_key", settings.extraction_anthropic_api_key) or ""
     env["EXTRACTION_MODEL"] = ex.get("extraction_model") or settings.extraction_model
+    # Agent web access (Tavily) — backend pushes it down; master env is fallback.
+    env["TAVILY_API_KEY"] = ex.get("tavily_api_key", settings.tavily_api_key) or ""
     if settings.vectordb_backend.strip().lower() == "pinecone":
         env["PINECONE_API_KEY"] = settings.pinecone_api_key or ""
         env["PINECONE_INDEX_NAME"] = settings.pinecone_index_name or ""
