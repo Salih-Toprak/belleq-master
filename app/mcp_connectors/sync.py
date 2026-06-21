@@ -104,17 +104,25 @@ class BackendConnectorSink:
                 action, payload = item
                 try:
                     if action == "upsert":
-                        client.post(f"{self._base}/internal/connectors/sync", json=payload)
-                    elif action == "remove":
-                        client.delete(
+                        resp = client.post(f"{self._base}/internal/connectors/sync", json=payload)
+                    else:  # remove
+                        resp = client.delete(
                             f"{self._base}/internal/connectors/"
                             f"{payload['workspace_id']}/{payload['connector_id']}"
                         )
+                    # raise_for_status so a 403 (bad token), 404 (wrong host/URL) or
+                    # 500 (missing table) is surfaced instead of silently swallowed —
+                    # otherwise a connector "succeeds" locally but never reaches the
+                    # durable store and there's no signal why.
+                    resp.raise_for_status()
+                    logger.info(
+                        "connector_mirror_ok action=%s connector_id=%s status=%s",
+                        action, payload.get("connector_id"), resp.status_code,
+                    )
                 except Exception:  # noqa: BLE001 — best-effort; just log
                     logger.warning(
-                        "connector_mirror_post_failed action=%s connector_id=%s",
-                        action,
-                        payload.get("connector_id"),
+                        "connector_mirror_post_failed action=%s connector_id=%s base=%s",
+                        action, payload.get("connector_id"), self._base,
                         exc_info=True,
                     )
                 finally:
