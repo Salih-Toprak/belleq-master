@@ -51,8 +51,11 @@ async def run_agent(
     try:
         return await client.run_agent(rec, payload)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("agent_run_passthrough_failed container=%s err=%s", container_name, exc)
-        raise HTTPException(status_code=502, detail=f"Context unavailable: {exc}") from exc
+        logger.warning("agent_run_passthrough_failed container=%s err=%s", container_name, exc, exc_info=True)
+        # Many transport errors (e.g. ReadTimeout) stringify to "" — include the
+        # type so the failure is diagnosable instead of a blank message.
+        detail = f"{type(exc).__name__}: {exc}".rstrip(": ")
+        raise HTTPException(status_code=502, detail=f"Context unavailable: {detail}") from exc
 
 
 @router.post("/{container_name}/notify")
