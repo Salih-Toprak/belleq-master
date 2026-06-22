@@ -157,11 +157,13 @@ class Settings(BaseSettings):
         ),
     )
     mcp_capture_enabled: bool = Field(
-        default=True,
+        default=False,
         description=(
             "MCP response capture (4C): observe connector tool results flowing "
             "through each per-context proxy and ingest document-like ones into that "
-            "context's knowledge base. Best-effort; never affects the tool call."
+            "context's knowledge base. DISABLED by default — raw tool dumps (e.g. "
+            "GitHub API JSON) pollute the KB with low-value data. Best-effort; never "
+            "affects the tool call."
         ),
     )
     mcp_capture_min_chars: int = Field(
