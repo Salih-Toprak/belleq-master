@@ -46,18 +46,35 @@ def _call(method: str, **payload):
     return r.json(), None
 
 
+def _latest_chat_id() -> str:
+    """Most recent chat that messaged the bot — so we can send without anyone
+    configuring a chat id (the user just messages the bot once)."""
+    data, err = _call_get("getUpdates")
+    if err or not data:
+        return ""
+    for upd in reversed(data.get("result", [])):
+        msg = upd.get("message") or upd.get("channel_post") or upd.get("edited_message") or {}
+        cid = (msg.get("chat") or {}).get("id")
+        if cid is not None:
+            return str(cid)
+    return ""
+
+
 @mcp.tool
 def send_message(text: str, chat_id: str | None = None) -> str:
-    """Send a Telegram message. Use this to notify the user. ``chat_id`` defaults
-    to the connector's configured chat when omitted."""
-    cid = (chat_id or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
-    if not cid:
-        return (
-            "No chat id. Set a default Chat ID on the Telegram connector, or pass "
-            "chat_id. Use telegram_get_chat_id to find it (message the bot first)."
-        )
+    """Send a Telegram message. Use this to notify the user. ``chat_id`` is
+    optional — if omitted it uses the connector's configured chat, or auto-detects
+    the most recent chat that messaged the bot."""
     if not (text or "").strip():
         return "Nothing to send: text is empty."
+    cid = (chat_id or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if not cid:
+        cid = _latest_chat_id()  # auto-detect — no manual chat id needed
+    if not cid:
+        return (
+            "No chat to send to yet. Open the bot in Telegram and send it a "
+            "message once, then try again."
+        )
     data, err = _call("sendMessage", chat_id=cid, text=text)
     if err:
         return err
