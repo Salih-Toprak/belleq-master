@@ -109,8 +109,11 @@ async def kb_passthrough(
     try:
         return await client.kb_op(rec, op, payload)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("kb_passthrough_failed container=%s op=%s err=%s", container_name, op, exc)
-        raise HTTPException(status_code=502, detail=f"Context unavailable: {exc}") from exc
+        logger.warning("kb_passthrough_failed container=%s op=%s err=%s", container_name, op, exc, exc_info=True)
+        # Transport errors (e.g. ReadTimeout) stringify to "" — include the type
+        # so it's not a blank "Context unavailable: ".
+        detail = f"{type(exc).__name__}: {exc}".rstrip(": ")
+        raise HTTPException(status_code=502, detail=f"Context unavailable: {detail}") from exc
 
 
 @router.get("/{container_name}/ingestion-stats")
