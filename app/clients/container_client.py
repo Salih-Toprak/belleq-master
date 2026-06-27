@@ -151,17 +151,23 @@ class ContainerClient:
         op: str,
         payload: dict | None = None,
     ) -> dict:
-        """Call a container KB REST endpoint (recall | query | record | flush).
+        """Call a container KB REST endpoint (recall | query | record | flush |
+        agent_write | upload).
 
         These mirror the MCP tools so non-MCP AI providers can use Belleq over
         plain HTTP. Auth is the stable ``X-Master-Key`` (``/internal/*``), so the
         per-context api_key can rotate without recreating the container.
-        Raises on transport/HTTP error so the caller can surface a real status.
+
+        Uses a generous read timeout (not the 10s client default) because writes
+        embed + upsert (Ollama + Qdrant), which can take well over 10s — otherwise
+        approvals/writes fail with a blank ReadTimeout. Raises on error so the
+        caller can surface a real status.
         """
         r = await self._client.post(
             f"{record.base_url.rstrip('/')}/internal/kb/{op}",
             headers=self._internal_headers(),
             json=payload or {},
+            timeout=httpx.Timeout(10.0, read=120.0),
         )
         r.raise_for_status()
         return r.json()
