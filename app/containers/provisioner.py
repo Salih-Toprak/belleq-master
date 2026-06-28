@@ -140,6 +140,13 @@ def _ensure_image(client, force: bool = False) -> None:
             return
         except ImageNotFound:
             pass
+    # Reclaim disk before pulling a fresh user image — old versions accumulate
+    # and a full disk makes the pull fail. Unused images only; volumes untouched.
+    try:
+        res = client.images.prune(filters={"dangling": False})
+        logger.info("user_image_prune reclaimed_bytes=%s", res.get("SpaceReclaimed", 0))
+    except Exception:  # noqa: BLE001 — best-effort
+        logger.warning("user_image_prune_failed", exc_info=True)
     logger.info("pulling_user_image image=%s", image)
     try:
         client.images.pull(image)
