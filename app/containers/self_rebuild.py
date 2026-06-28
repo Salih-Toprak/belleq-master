@@ -84,6 +84,19 @@ def build_self_spec(new_image: str) -> dict:
     }
 
 
+def _prune_images(client) -> None:
+    """Remove unused images + build cache to free disk. Best-effort; in-use
+    images (running containers) are kept, volumes are never touched."""
+    try:
+        # dangling=False → prune ALL images not used by a container, not just
+        # untagged ones (that's what reclaims old belleq-* versions).
+        res = client.images.prune(filters={"dangling": False})
+        reclaimed = res.get("SpaceReclaimed", 0)
+        logger.info("master_self_rebuild_pruned reclaimed_bytes=%s", reclaimed)
+    except Exception:  # noqa: BLE001 — pruning must never block a rebuild
+        logger.warning("master_self_rebuild_prune_failed", exc_info=True)
+
+
 def trigger_rebuild() -> dict:
     """Pull the newest master image and hand off recreation to a rebuilder.
 
@@ -95,6 +108,12 @@ def trigger_rebuild() -> dict:
     image = me.attrs.get("Config", {}).get("Image", "")
     if not image:
         raise RuntimeError("Could not determine the master image reference")
+
+    # Reclaim disk BEFORE pulling — old image layers pile up on the host and a
+    # full disk makes `pull` fail silently ("no space left on device"), leaving
+    # the master pinned to the stale cached image. Prunes unused images only
+    # (images in use by a running container are kept); never touches volumes.
+    _prune_images(client)
 
     logger.info("master_self_rebuild_pull image=%s", image)
     client.images.pull(image)
