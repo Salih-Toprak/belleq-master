@@ -24,6 +24,7 @@ from app.api import (
     kb_routes,
     mcp_routes,
     registry_routes,
+    retention_routes,
     sources_routes,
     vectordb_routes,
 )
@@ -215,6 +216,7 @@ app.include_router(containers_routes.router)
 app.include_router(conversations_routes.router)
 app.include_router(kb_routes.router)
 app.include_router(kb_routes.ingestion_router)
+app.include_router(retention_routes.router)
 app.include_router(agents_routes.router)
 
 
