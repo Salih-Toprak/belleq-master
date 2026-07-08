@@ -172,6 +172,27 @@ class ContainerClient:
         r.raise_for_status()
         return r.json()
 
+    async def retention_call(
+        self,
+        record: ContainerRecord,
+        path: str,
+        method: str = "GET",
+        payload: dict | None = None,
+    ) -> dict:
+        """Call a container retention endpoint (``/internal/retention/*``) or
+        its runtime-config PATCH. A sweep scrolls the whole collection, so use
+        a generous read timeout like ``kb_op``."""
+        url = f"{record.base_url.rstrip('/')}{path}"
+        r = await self._client.request(
+            method,
+            url,
+            headers=self._internal_headers(),
+            json=payload if payload is not None else None,
+            timeout=httpx.Timeout(10.0, read=120.0),
+        )
+        r.raise_for_status()
+        return r.json()
+
     async def run_agent(
         self,
         record: ContainerRecord,
