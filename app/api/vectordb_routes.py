@@ -16,6 +16,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/master/vectordb", tags=["Vector DB"])
 
 
+def _vdb_http_error(e: VectorDBError) -> HTTPException:
+    """Map a VectorDBError to the right HTTP status.
+
+    A missing collection must surface as 404, not 503: contexts get their
+    collection name at provision time but Qdrant only creates it on the first
+    write, so "collection doesn't exist" is the normal empty state the
+    dashboard renders as "no records yet". qdrant-client wraps the upstream
+    404 in an UnexpectedResponse whose text carries the raw body.
+    """
+    msg = str(e).lower()
+    if "not found" in msg or "doesn't exist" in msg or "does not exist" in msg:
+        return HTTPException(status_code=404, detail=str(e))
+    return HTTPException(status_code=503, detail=str(e))
+
+
 def _must_filter(source: str | None, department: str | None) -> dict | None:
     must: list[dict] = []
     if source:
@@ -75,9 +90,7 @@ async def get_collection(
     try:
         return await adapter.get_collection_info(collection_name)
     except VectorDBError as e:
-        if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        raise HTTPException(status_code=503, detail=str(e)) from e
+        raise _vdb_http_error(e) from e
 
 
 @router.get("/collections/{collection_name}/count", summary="Point count with optional filters")
@@ -94,7 +107,7 @@ async def count_points(
         n = await adapter.count(collection_name, flt)
         return {"collection": collection_name, "count": n, "filters": flt}
     except VectorDBError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
+        raise _vdb_http_error(e) from e
 
 
 @router.get("/collections/{collection_name}/docs", summary="Paginated payload listing (no vectors)")
@@ -127,7 +140,7 @@ async def list_docs(
             "documents": documents,
         }
     except VectorDBError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
+        raise _vdb_http_error(e) from e
 
 
 @router.get("/collections/{collection_name}/docs/{doc_id}", summary="All chunks for a doc_id")
@@ -146,9 +159,7 @@ async def get_doc_chunks(
     except HTTPException:
         raise
     except VectorDBError as e:
-        if "not found" in str(e).lower():
-            raise HTTPException(status_code=404, detail=str(e)) from e
-        raise HTTPException(status_code=503, detail=str(e)) from e
+        raise _vdb_http_error(e) from e
 
 
 @router.delete("/collections/{collection_name}/docs/{doc_id}", summary="Delete vectors for doc_id")
@@ -166,7 +177,7 @@ async def delete_doc_vectors(
         removed = await adapter.delete_by_doc_id(collection_name, doc_id)
         return {"deleted": doc_id, "points_removed": removed}
     except VectorDBError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
+        raise _vdb_http_error(e) from e
 
 
 @router.post("/collections", summary="Create a new collection")
