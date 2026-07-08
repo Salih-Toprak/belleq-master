@@ -2,6 +2,8 @@
 
 The **Belleq Master Container** is the master orchestration layer for the Belleq knowledge infrastructure platform. It is not an end-user application: it is one independently deployable building block that coordinates a central vector store, a container registry, and HTTP calls into many user-scoped containers.
 
+> **Current architecture note (July 2026):** the product-facing unit is now the **context** (what this README calls a "user container" is registered and driven the same way, just under that newer name at the platform layer). Two things this README doesn't cover below, both live in this repo: an **MCP OAuth connector layer** (`app/mcp_connectors/`, routes under `/master/mcp/connectors`) that supersedes direct Slack/Notion-only ingestion for most use cases — see [MCP connectors](#mcp-connectors-oauth) — and an **agent-orchestration bridge** (`app/api/agents_routes.py`) that lets the platform backend trigger and notify per-context agents running in `belleq-user`. The Slack/Notion source-ingestion flow described in [Data Sources & Ingestion](#data-sources--ingestion) still exists and still works; it's a second, older ingestion path alongside MCP-connector-driven capture. A **skill library** (curated catalog of AI skills, addable to a context like a connector) is scoped and marketed on `belleq.app` but has **no code in this repo yet**.
+
 ## The building block principle
 
 Each Belleq component lives in its own repository and ships as its own container image. Components communicate over stable HTTP contracts and configuration (environment variables and the SQLite registry), so you can upgrade, scale, or replace one piece without rebuilding the whole platform. This master container never imports user container code and never reads user container databases; it only calls their HTTP APIs.
@@ -126,6 +128,39 @@ curl -sS -X POST http://localhost:9000/master/registry/containers \
 | `/master/ingestion/scheduler` | PUT | Update interval minutes. |
 
 Interactive OpenAPI docs: `http://localhost:9000/docs`.
+
+## MCP connectors (OAuth)
+
+Added alongside the context model; not in the original endpoint table above. Registered connectors are mirrored from the platform backend's durable `workspace_connectors` table (secrets stored only as Fernet ciphertext) and re-hydrated here on every provision.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/master/mcp/connectors` | GET | List registered MCP connectors. |
+| `/master/mcp/connectors/{id}` | GET | Fetch one connector. |
+| `/master/mcp/connectors` | POST | Register a new connector. |
+| `/master/mcp/connectors/import` | POST | Bulk-hydrate connectors from the backend (used on provision/rebuild). |
+| `/master/mcp/connectors/{id}` | PATCH | Update a connector. |
+| `/master/mcp/connectors/{id}` | DELETE | Remove a connector. |
+| `/master/mcp/connectors/{id}/enable` \| `/disable` | POST | Enable/disable without deleting. |
+| `/master/mcp/connectors/{id}/test` | POST | Live-test a connector's credentials. |
+| `/master/mcp/connectors/{id}/authorize` | POST | Begin OAuth for a connector. |
+| `/master/mcp/oauth/exchange` | POST | Complete OAuth (code → tokens). |
+
+## Agent bridge
+
+Lets the platform backend trigger an agent run or send it a notification without the backend talking to the per-context `belleq-user` container directly.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/{container_name}/run` | POST | Trigger an agent run inside that context's container. |
+| `/{container_name}/notify` | POST | Deliver a notification to an agent (e.g. inbound Telegram message). |
+
+## Conversation capture
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/master/conversations/flush` | POST | Flush buffered conversations into the KB now (also wired to the dashboard's "Flush to KB now" button). |
+| `/master/conversations/stats` | GET | Conversation-extraction stats across the workspace. |
 
 ## Container registry contract
 
