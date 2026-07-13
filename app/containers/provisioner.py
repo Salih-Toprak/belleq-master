@@ -304,3 +304,55 @@ def _remove_container(container_name: str) -> None:
 
 async def delete_user_container(container_name: str) -> None:
     await asyncio.to_thread(_remove_container, container_name)
+
+
+_CTX_PREFIX = "belleq-ctx-"
+
+
+def _reap_orphans(keep: set[str], min_age_seconds: int) -> list[str]:
+    """Remove context containers on this host that no longer have a DB row.
+
+    ``keep`` is the set of container names the backend still considers valid
+    (any workspace on this host). Any ``belleq-ctx-*`` container NOT in that set
+    and older than ``min_age_seconds`` is a zombie — a context whose delete
+    failed to tear it down, or whose row is gone — so we force-remove it.
+
+    Deliberately conservative: it only ever touches ``belleq-ctx-*`` names
+    (never the master/qdrant/ollama), honours a min-age so a just-created
+    container mid-provision is never caught, and LEAVES the ``-data`` volume
+    intact so even a mistaken removal loses no knowledge base — the context can
+    be recreated onto the same volume.
+    """
+    from datetime import datetime, timezone
+
+    client = _docker_client()
+    now = datetime.now(timezone.utc).timestamp()
+    removed: list[str] = []
+    try:
+        containers = client.containers.list(all=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("reap_list_failed", exc_info=True)
+        return removed
+
+    for c in containers:
+        name = getattr(c, "name", "") or ""
+        if not name.startswith(_CTX_PREFIX) or name in keep:
+            continue
+        created = (getattr(c, "attrs", {}) or {}).get("Created") or ""
+        try:
+            ts = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+        except (ValueError, AttributeError):
+            ts = 0.0
+        if ts and (now - ts) < min_age_seconds:
+            continue  # too young — could be mid-provision
+        try:
+            c.remove(force=True)  # container only; the -data volume is left intact
+            removed.append(name)
+            logger.info("orphan_container_reaped name=%s", name)
+        except Exception:  # noqa: BLE001
+            logger.warning("orphan_reap_failed name=%s", name, exc_info=True)
+    return removed
+
+
+async def reap_orphan_containers(keep: list[str], min_age_seconds: int = 300) -> list[str]:
+    return await asyncio.to_thread(_reap_orphans, set(keep or []), int(min_age_seconds))
