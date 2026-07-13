@@ -110,6 +110,22 @@ async def count_points(
         raise _vdb_http_error(e) from e
 
 
+@router.get("/collections/{collection_name}/size", summary="Total ingested text bytes")
+async def collection_size(
+    collection_name: str,
+    _: None = Depends(require_admin),
+    adapter: VectorDBAdapter = Depends(require_vectordb),
+) -> dict:
+    """Real KB storage footprint of a collection: the sum of every chunk's
+    ``text`` payload in UTF-8 bytes. Backend calls this on its hourly reconcile
+    to overwrite the workspace storage meter with the truth."""
+    try:
+        n = await adapter.collection_text_bytes(collection_name)
+        return {"collection": collection_name, "bytes": n}
+    except VectorDBError as e:
+        raise _vdb_http_error(e) from e
+
+
 @router.get("/collections/{collection_name}/docs", summary="Paginated payload listing (no vectors)")
 async def list_docs(
     collection_name: str,
