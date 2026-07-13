@@ -20,6 +20,7 @@ from app.containers.provisioner import (
     ProvisionError,
     delete_user_container,
     provision_user_container,
+    reap_orphan_containers,
 )
 from app.registry.models import ContainerRecord
 from app.registry.registry import ContainerRegistry
@@ -169,6 +170,32 @@ async def rebuild_self(_: None = Depends(require_admin)) -> dict:
         raise HTTPException(status_code=500, detail=f"Master rebuild failed: {e}") from e
     logger.info("master_self_rebuild_triggered image=%s", result.get("image"))
     return result
+
+
+class ReapBody(BaseModel):
+    """Names the backend still considers valid, plus a safety min-age."""
+
+    keep: list[str] = Field(default_factory=list)
+    min_age_seconds: int = Field(default=300, ge=0)
+
+
+@router.post("/reap", summary="Remove orphaned context containers not in the keep-list")
+async def reap_containers(
+    body: ReapBody,
+    request: Request,
+    _: None = Depends(require_admin),
+) -> dict:
+    """Force-remove ``belleq-ctx-*`` containers on this host whose name isn't in
+    ``keep`` (i.e. their DB row is gone). Cleans up zombies left by a delete
+    whose teardown failed. Data volumes are preserved."""
+    removed = await reap_orphan_containers(body.keep, body.min_age_seconds)
+    registry: ContainerRegistry = get_registry(request)
+    for name in removed:
+        try:
+            registry.remove(name)
+        except KeyError:
+            pass
+    return {"removed": removed, "count": len(removed)}
 
 
 @router.delete("/{container_name}", summary="Stop and remove a user container")

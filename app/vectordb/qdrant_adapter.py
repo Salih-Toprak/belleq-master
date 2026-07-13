@@ -231,6 +231,30 @@ class QdrantAdapter(VectorDBAdapter):
         except Exception as e:  # noqa: BLE001
             raise VectorDBError(str(e), self.backend_name, detail=str(e)) from e
 
+    async def collection_text_bytes(self, collection_name: str) -> int:
+        """Sum of every chunk's ``text`` payload (UTF-8 bytes) across the whole
+        collection, using Qdrant's native cursor scroll and fetching only the
+        ``text`` field — no vectors, no other payload."""
+        total = 0
+        next_page: Any = None
+        try:
+            while True:
+                points, next_page = await self._client.scroll(
+                    collection_name=collection_name,
+                    limit=512,
+                    offset=next_page,
+                    with_payload=["text"],
+                    with_vectors=False,
+                )
+                for pt in points:
+                    text = (pt.payload or {}).get("text") or ""
+                    total += len(text.encode("utf-8"))
+                if next_page is None or not points:
+                    break
+            return total
+        except Exception as e:  # noqa: BLE001
+            raise VectorDBError(str(e), self.backend_name, detail=str(e)) from e
+
     async def set_payload_by_filter(
         self,
         collection_name: str,

@@ -153,3 +153,23 @@ class VectorDBAdapter(ABC):
         Used for admin listing and health checks.
         """
 
+    async def collection_text_bytes(self, collection_name: str) -> int:
+        """Total ingested-text bytes across a collection — the sum of every
+        chunk's ``text`` payload, UTF-8 encoded. This is the KB storage metric
+        the backend reconciles against. Default implementation walks ``scroll``;
+        adapters with a native cursor should override for efficiency."""
+        total = 0
+        offset = 0
+        page = 500
+        while True:
+            rows = await self.scroll(collection_name, limit=page, offset=offset)
+            if not rows:
+                break
+            for r in rows:
+                text = (r.get("payload") or {}).get("text") or ""
+                total += len(text.encode("utf-8"))
+            if len(rows) < page:
+                break
+            offset += page
+        return total
+
