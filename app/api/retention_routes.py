@@ -116,6 +116,21 @@ async def retention_restore(
     )
 
 
+@router.post("/{container_name}/claim-release")
+async def retention_claim_release(
+    container_name: str,
+    request: Request,
+    registry: ContainerRegistry = Depends(get_registry),
+    client: ContainerClient = Depends(get_client),
+) -> dict:
+    """Backend-only: claim bytes freed by purges in this container so the
+    backend can release them from the usage meter. Workspace-scoped like the
+    rest (the backend passes X-Workspace-Id when draining a specific
+    workspace; the periodic drain omits it and sweeps every container)."""
+    rec = _record(registry, request, container_name)
+    return await _call(client, rec, "/internal/retention/claim-release", method="POST", payload={})
+
+
 @router.patch("/{container_name}/config")
 async def retention_config(
     container_name: str,
