@@ -180,6 +180,42 @@ async def delete_doc_vectors(
         raise _vdb_http_error(e) from e
 
 
+class PinBody(BaseModel):
+    """Pin/unpin all chunks of a doc. Pinned docs are protected from retention
+    auto-archival and shown with a badge in the dashboard."""
+
+    pinned: bool = True
+
+
+@router.post("/collections/{collection_name}/docs/{doc_id}/pin", summary="Pin/unpin a doc")
+async def pin_doc(
+    collection_name: str,
+    doc_id: str,
+    body: PinBody,
+    _: None = Depends(require_admin),
+    adapter: VectorDBAdapter = Depends(require_vectordb),
+) -> dict:
+    """Set the ``pinned`` payload flag on every chunk of ``doc_id``. Retention
+    reads this flag and never auto-archives a pinned doc."""
+    from datetime import datetime, timezone
+
+    payload = {
+        "pinned": bool(body.pinned),
+        "pinned_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if body.pinned
+        else None,
+    }
+    try:
+        n = await adapter.set_payload_by_filter(
+            collection_name,
+            {"must": [{"field": "doc_id", "value": doc_id}]},
+            payload,
+        )
+        return {"doc_id": doc_id, "pinned": bool(body.pinned), "chunks": n}
+    except VectorDBError as e:
+        raise _vdb_http_error(e) from e
+
+
 @router.post("/collections", summary="Create a new collection")
 async def create_collection(
     body: CreateCollectionBody,
