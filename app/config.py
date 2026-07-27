@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     # provision; lets a standalone master grant agents web tools too.
     tavily_api_key: str = Field(default="")
 
+    # Google (Gmail + Calendar) connector. belleq's own OAuth app — platform-wide,
+    # pushed from the backend at provision time. The per-user refresh token lives
+    # on each connector (encrypted), never here. Blank = the Google connector is
+    # unavailable and the dashboard says so.
+    google_client_id: str = Field(default="")
+    google_client_secret: str = Field(default="")
+
     # Security (optional Fernet key for credentials at rest)
     credential_encryption_key: str = Field(default="")
 
