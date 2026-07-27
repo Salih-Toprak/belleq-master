@@ -16,7 +16,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_registry, require_admin
-from app.mcp_connectors import oauth
+from app.config import settings
+from app.mcp_connectors import google_oauth, oauth
 from app.mcp_connectors.models import VALID_TRANSPORTS, MCPConnectorRecord
 from app.mcp_connectors.registry import MCPConnectorRegistry
 from app.mcp_connectors.upstream import test_connection
@@ -375,6 +376,39 @@ async def authorize_connector(
     reg = _get_connector_registry(request)
     rec = _owned_or_404(reg, connector_id, request)
 
+    # Google (bundled Gmail/Calendar connector) isn't an MCP server: no
+    # protected-resource discovery, no dynamic client registration — belleq owns
+    # a single registered OAuth app that every user consents to.
+    if (rec.metadata or {}).get("provider") == "google":
+        if not settings.google_client_id or not settings.google_client_secret:
+            raise HTTPException(
+                status_code=503,
+                detail="Google connections aren't configured on this server yet.",
+            )
+        verifier, challenge = oauth.make_pkce()
+        state = _secrets.token_urlsafe(24)
+        auth_url = google_oauth.build_authorization_url(
+            client_id=settings.google_client_id,
+            redirect_uri=body.redirect_uri,
+            state=state,
+            code_challenge=challenge,
+        )
+        request.app.state.db.save_oauth_state(
+            state,
+            connector_id,
+            {
+                "provider": "google",
+                "code_verifier": verifier,
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "token_endpoint": google_oauth.TOKEN_ENDPOINT,
+                "redirect_uri": body.redirect_uri,
+                "resource": "",
+            },
+        )
+        reg.update(connector_id, {"auth_status": "pending"})
+        return {"auth_required": True, "authorization_url": auth_url, "state": state}
+
     try:
         meta = await oauth.discover(rec.url)
     except oauth.OAuthError as e:
@@ -465,7 +499,31 @@ async def oauth_exchange(
             "resource": p.get("resource", ""),
         }
     )
-    reg.update(connector_id, {"oauth": tokens, "auth_status": "connected"})
+    updates: dict[str, Any] = {"oauth": tokens, "auth_status": "connected"}
+
+    # Google runs as a bundled stdio server, which reads its grant from the
+    # process env rather than the aggregator's Authorization header — so mirror
+    # the refresh token into env (encrypted at rest like every other secret).
+    # Google only returns a refresh_token on first consent, so keep the existing
+    # one if this exchange didn't carry a new one.
+    if p.get("provider") == "google":
+        current = reg.get(connector_id)
+        existing = dict((current.env if current else {}) or {})
+        refresh = tokens.get("refresh_token") or existing.get("GOOGLE_REFRESH_TOKEN", "")
+        if not refresh:
+            reg.update(connector_id, {"auth_status": "error"})
+            db.delete_oauth_state(body.state)
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Google didn't return a refresh token. Remove belleq at "
+                    "myaccount.google.com/permissions and connect again."
+                ),
+            )
+        existing["GOOGLE_REFRESH_TOKEN"] = refresh
+        updates["env"] = existing
+
+    reg.update(connector_id, updates)
     db.delete_oauth_state(body.state)
     logger.info("oauth_connected connector_id=%s", connector_id)
     return {"connector_id": connector_id, "auth_status": "connected"}
