@@ -376,10 +376,11 @@ async def authorize_connector(
     reg = _get_connector_registry(request)
     rec = _owned_or_404(reg, connector_id, request)
 
-    # Google (bundled Gmail/Calendar connector) isn't an MCP server: no
-    # protected-resource discovery, no dynamic client registration — belleq owns
-    # a single registered OAuth app that every user consents to.
-    if (rec.metadata or {}).get("provider") == "google":
+    # Google apps (Gmail, Calendar — each its own connector) aren't MCP servers:
+    # no protected-resource discovery, no dynamic client registration. belleq owns
+    # one registered OAuth app, and each connector asks only for its app's scopes.
+    provider = (rec.metadata or {}).get("provider", "")
+    if provider in google_oauth.PROVIDERS:
         if not settings.google_client_id or not settings.google_client_secret:
             raise HTTPException(
                 status_code=503,
@@ -392,12 +393,13 @@ async def authorize_connector(
             redirect_uri=body.redirect_uri,
             state=state,
             code_challenge=challenge,
+            scopes=google_oauth.scopes_for(provider),
         )
         request.app.state.db.save_oauth_state(
             state,
             connector_id,
             {
-                "provider": "google",
+                "provider": provider,
                 "code_verifier": verifier,
                 "client_id": settings.google_client_id,
                 "client_secret": settings.google_client_secret,
@@ -501,12 +503,12 @@ async def oauth_exchange(
     )
     updates: dict[str, Any] = {"oauth": tokens, "auth_status": "connected"}
 
-    # Google runs as a bundled stdio server, which reads its grant from the
+    # Google apps run as bundled stdio servers, which read their grant from the
     # process env rather than the aggregator's Authorization header — so mirror
     # the refresh token into env (encrypted at rest like every other secret).
     # Google only returns a refresh_token on first consent, so keep the existing
     # one if this exchange didn't carry a new one.
-    if p.get("provider") == "google":
+    if p.get("provider") in google_oauth.PROVIDERS:
         current = reg.get(connector_id)
         existing = dict((current.env if current else {}) or {})
         refresh = tokens.get("refresh_token") or existing.get("GOOGLE_REFRESH_TOKEN", "")
