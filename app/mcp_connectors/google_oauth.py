@@ -20,19 +20,34 @@ from urllib.parse import urlencode
 AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 
-# What the bundled google_server actually uses. Keep in sync with its tools.
-SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",   # search + read (restricted)
-    "https://www.googleapis.com/auth/gmail.modify",     # archive/label/draft (restricted)
-    "https://www.googleapis.com/auth/gmail.send",       # send + reply (sensitive)
-    "https://www.googleapis.com/auth/calendar.events",  # read + create events
-    "openid",
-    "email",
-]
+# Each Google app is a SEPARATE connector with its own consent, so it asks only
+# for its own scopes — connecting Calendar never grants access to mail. Keep each
+# list in sync with that server's tools.
+SCOPES_BY_PROVIDER: dict[str, list[str]] = {
+    "gmail": [
+        "https://www.googleapis.com/auth/gmail.readonly",  # search + read (restricted)
+        "https://www.googleapis.com/auth/gmail.modify",    # archive/label/draft (restricted)
+        "https://www.googleapis.com/auth/gmail.send",      # send + reply (sensitive)
+        "openid",
+        "email",
+    ],
+    "google_calendar": [
+        "https://www.googleapis.com/auth/calendar.events",  # read + create + delete events
+        "openid",
+        "email",
+    ],
+}
+
+# Connector metadata.provider values handled by this module.
+PROVIDERS = frozenset(SCOPES_BY_PROVIDER)
+
+
+def scopes_for(provider: str) -> list[str]:
+    return SCOPES_BY_PROVIDER.get(provider, [])
 
 
 def build_authorization_url(
-    *, client_id: str, redirect_uri: str, state: str, code_challenge: str
+    *, client_id: str, redirect_uri: str, state: str, code_challenge: str, scopes: list[str]
 ) -> str:
     """Google consent URL.
 
@@ -45,7 +60,7 @@ def build_authorization_url(
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": " ".join(SCOPES),
+        "scope": " ".join(scopes),
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",

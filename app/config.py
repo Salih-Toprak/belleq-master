@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     ollama_embed_model: str = Field(default="nomic-embed-text")
     openai_api_key: str = Field(default="")
     openai_embed_model: str = Field(default="text-embedding-3-small")
+    # Pinecone Inference (EMBEDDING_BACKEND=pinecone) — reuses PINECONE_API_KEY.
+    pinecone_embed_model: str = Field(default="multilingual-e5-large")
     embedding_vector_size: int = Field(default=768)
 
     # Ingestion

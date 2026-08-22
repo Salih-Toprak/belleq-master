@@ -20,7 +20,7 @@ from app.config import settings
 from app.mcp_connectors import google_oauth, oauth
 from app.mcp_connectors.models import VALID_TRANSPORTS, MCPConnectorRecord
 from app.mcp_connectors.registry import MCPConnectorRegistry
-from app.mcp_connectors.upstream import test_connection
+from app.mcp_connectors.upstream import test_connection, validate_stdio
 from app.registry.registry import ContainerRegistry
 
 logger = logging.getLogger(__name__)
@@ -109,7 +109,9 @@ class WhitelistSet(BaseModel):
     connector_ids: list[str] = Field(default_factory=list)
 
 
-def _validate_transport(transport: str, url: str, command: str) -> None:
+def _validate_transport(
+    transport: str, url: str, command: str, args: list[str] | None = None
+) -> None:
     t = (transport or "").strip().lower()
     if t not in VALID_TRANSPORTS:
         raise HTTPException(
@@ -118,8 +120,14 @@ def _validate_transport(transport: str, url: str, command: str) -> None:
         )
     if t in ("streamable_http", "sse") and not (url or "").strip():
         raise HTTPException(status_code=422, detail=f"{t} connector requires a url")
-    if t == "stdio" and not (command or "").strip():
-        raise HTTPException(status_code=422, detail="stdio connector requires a command")
+    if t == "stdio":
+        if not (command or "").strip():
+            raise HTTPException(status_code=422, detail="stdio connector requires a command")
+        # A stdio connector runs a command on the master host, so only belleq's
+        # own bundled servers are allowed — never a caller-supplied command.
+        err = validate_stdio(command, args)
+        if err:
+            raise HTTPException(status_code=422, detail=err)
 
 
 # --- Connector CRUD ---------------------------------------------------
@@ -153,7 +161,7 @@ async def create_connector(
     request: Request,
     _: None = Depends(require_admin),
 ) -> dict:
-    _validate_transport(body.transport, body.url, body.command)
+    _validate_transport(body.transport, body.url, body.command, body.args)
     now = datetime.now(timezone.utc)
     rec = MCPConnectorRecord(
         connector_id=body.connector_id.strip(),
@@ -265,12 +273,15 @@ async def patch_connector(
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         return _connector_to_public(current)
-    # Re-validate transport when any of the relevant fields change.
-    if {"transport", "url", "command"} & updates.keys():
+    # Re-validate transport when any of the relevant fields change. ``args`` is
+    # included: it selects which bundled module a stdio connector runs, so
+    # changing it alone must not bypass the allowlist.
+    if {"transport", "url", "command", "args"} & updates.keys():
         _validate_transport(
             updates.get("transport", current.transport),
             updates.get("url", current.url),
             updates.get("command", current.command),
+            updates.get("args", current.args),
         )
     if "transport" in updates:
         updates["transport"] = str(updates["transport"]).strip().lower()
@@ -376,10 +387,11 @@ async def authorize_connector(
     reg = _get_connector_registry(request)
     rec = _owned_or_404(reg, connector_id, request)
 
-    # Google (bundled Gmail/Calendar connector) isn't an MCP server: no
-    # protected-resource discovery, no dynamic client registration — belleq owns
-    # a single registered OAuth app that every user consents to.
-    if (rec.metadata or {}).get("provider") == "google":
+    # Google apps (Gmail, Calendar — each its own connector) aren't MCP servers:
+    # no protected-resource discovery, no dynamic client registration. belleq owns
+    # one registered OAuth app, and each connector asks only for its app's scopes.
+    provider = (rec.metadata or {}).get("provider", "")
+    if provider in google_oauth.PROVIDERS:
         if not settings.google_client_id or not settings.google_client_secret:
             raise HTTPException(
                 status_code=503,
@@ -392,12 +404,13 @@ async def authorize_connector(
             redirect_uri=body.redirect_uri,
             state=state,
             code_challenge=challenge,
+            scopes=google_oauth.scopes_for(provider),
         )
         request.app.state.db.save_oauth_state(
             state,
             connector_id,
             {
-                "provider": "google",
+                "provider": provider,
                 "code_verifier": verifier,
                 "client_id": settings.google_client_id,
                 "client_secret": settings.google_client_secret,
@@ -501,12 +514,12 @@ async def oauth_exchange(
     )
     updates: dict[str, Any] = {"oauth": tokens, "auth_status": "connected"}
 
-    # Google runs as a bundled stdio server, which reads its grant from the
+    # Google apps run as bundled stdio servers, which read their grant from the
     # process env rather than the aggregator's Authorization header — so mirror
     # the refresh token into env (encrypted at rest like every other secret).
     # Google only returns a refresh_token on first consent, so keep the existing
     # one if this exchange didn't carry a new one.
-    if p.get("provider") == "google":
+    if p.get("provider") in google_oauth.PROVIDERS:
         current = reg.get(connector_id)
         existing = dict((current.env if current else {}) or {})
         refresh = tokens.get("refresh_token") or existing.get("GOOGLE_REFRESH_TOKEN", "")
