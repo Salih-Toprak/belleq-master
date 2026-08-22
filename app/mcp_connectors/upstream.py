@@ -23,6 +23,69 @@ _HTTP_TRANSPORTS = ("streamable_http", "sse")
 _TOKEN_REFRESH_MARGIN_SECONDS = 60.0
 
 
+# ── stdio policy ─────────────────────────────────────────────────────────────
+# A stdio connector is a command executed ON THE MASTER HOST, so an arbitrary
+# command from an API caller would be remote code execution with the master's
+# privileges (and its secrets). stdio is therefore reserved for belleq's OWN
+# bundled servers: an explicit allowlist, checked both when a connector is
+# stored and again right before launch. Third-party servers use http/sse.
+
+ALLOWED_STDIO_COMMANDS = frozenset({"python", "python3"})
+
+ALLOWED_STDIO_MODULES = frozenset({
+    "app.mcp_servers.telegram_server",
+    "app.mcp_servers.gmail_server",
+    "app.mcp_servers.google_calendar_server",
+})
+
+# Host env a bundled server needs to run at all (find the interpreter, imports).
+# NOT the master's full environment — that would hand every connector the
+# admin key, the credential-encryption key, and the platform OAuth secrets.
+_ENV_PASSTHROUGH = (
+    "PATH", "PYTHONPATH", "PYTHONHOME", "PYTHONUNBUFFERED",
+    "HOME", "LANG", "LC_ALL", "TZ",
+)
+
+# Platform credentials handed to specific bundled servers only.
+_ENV_FOR_MODULE: dict[str, tuple[str, ...]] = {
+    "app.mcp_servers.gmail_server": ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"),
+    "app.mcp_servers.google_calendar_server": ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"),
+}
+
+
+def stdio_module(command: str, args: list[str] | None) -> str:
+    """The bundled module a stdio spec runs, or "" if it isn't an allowed one.
+
+    Only the exact shape ``python -m <allowlisted module>`` is accepted — no
+    shell, no extra arguments, no arbitrary scripts.
+    """
+    argv = [str(a) for a in (args or [])]
+    if (command or "").strip() not in ALLOWED_STDIO_COMMANDS:
+        return ""
+    if len(argv) != 2 or argv[0] != "-m":
+        return ""
+    return argv[1] if argv[1] in ALLOWED_STDIO_MODULES else ""
+
+
+def validate_stdio(command: str, args: list[str] | None) -> str:
+    """Return an error message for a rejected stdio spec, or "" when allowed."""
+    if stdio_module(command, args):
+        return ""
+    return (
+        "stdio connectors are reserved for belleq's built-in servers. "
+        "Add third-party MCP servers by URL (http/sse) instead."
+    )
+
+
+def _stdio_env(module: str, record_env: dict[str, str] | None) -> dict[str, str]:
+    env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
+    for k in _ENV_FOR_MODULE.get(module, ()):
+        if k in os.environ:
+            env[k] = os.environ[k]
+    env.update(record_env or {})
+    return env
+
+
 async def ensure_fresh_token(
     record: MCPConnectorRecord,
     *,
@@ -118,15 +181,23 @@ def build_client(record: MCPConnectorRecord, *, transport: str | None = None):
     if t == "stdio":
         if not record.command:
             raise ValueError("stdio connector requires a command")
-        # Inherit the master's environment (PATH, PYTHONPATH, …) and overlay only
-        # the connector's secrets, so commands like `python -m app...` resolve and
-        # bundled servers can import the app package. Without this the subprocess
-        # would get ONLY record.env and fail to even find the interpreter.
+        # Re-check the allowlist at launch, not just at write time: a record could
+        # predate the policy or have been changed by another path.
+        module = stdio_module(record.command, record.args)
+        if not module:
+            logger.warning(
+                "stdio_connector_blocked connector_id=%s command=%r",
+                record.connector_id, record.command,
+            )
+            raise ValueError(validate_stdio(record.command, record.args))
+        # Curated env only — enough to find the interpreter and import the app,
+        # plus this module's own platform credentials, plus the connector's
+        # secrets. Never the master's full environment.
         return Client(
             StdioTransport(
                 command=record.command,
                 args=list(record.args or []),
-                env={**os.environ, **(record.env or {})},
+                env=_stdio_env(module, record.env),
             )
         )
 
